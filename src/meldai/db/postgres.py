@@ -1,7 +1,7 @@
 """PostgreSQL data source driver for clinical training datasets."""
 
 import logging
-from typing import Optional
+from typing import Any, Dict, List, Optional
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -69,6 +69,51 @@ class PostgresSource:
             df = pd.read_sql(query, conn, params={"limit": limit})
             logger.info("Extracted %d clinical records from PostgreSQL", len(df))
             return df
+
+    def stream_patient_visit_data(self, batch_size: int = 1000):
+        """
+        Extract patient visit data from PostgreSQL table 'temp_migrations.patient_visit_data'
+        in batches of batch_size (default 1000).
+        Yields list of dicts for each batch.
+        """
+        query = text("""
+            SELECT
+                pvd."Case No",
+                pvd."Visit Date",
+                pvd."Visit Reason"
+            FROM temp_migrations.patient_visit_data pvd
+        """)
+
+        def _parse_case_no(val: Optional[str]) -> Any:
+            if val is None:
+                return 0
+            if isinstance(val, int):
+                return val
+            s_val = str(val).strip()
+            if s_val.isdigit():
+                return int(s_val)
+            digits = "".join(filter(str.isdigit, s_val))
+            if digits:
+                return int(digits)
+            return s_val
+
+        with self.engine.connect() as conn:
+            result = conn.execution_options(yield_per=batch_size).execute(query)
+            while True:
+                rows = result.fetchmany(batch_size)
+                if not rows:
+                    break
+                batch = []
+                for row in rows:
+                    raw_case_no, visit_date, visit_reason = row[0], row[1], row[2]
+                    case_no = _parse_case_no(raw_case_no)
+                    batch.append({
+                        "caseNo": case_no,
+                        "visitDate": visit_date,
+                        "visitReason": visit_reason,
+                    })
+                logger.info("Fetched batch of %d records from PostgreSQL", len(batch))
+                yield batch
 
     def close(self) -> None:
         """Dispose of the connection pool."""

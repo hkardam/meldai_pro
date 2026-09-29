@@ -4,7 +4,7 @@ import logging
 from typing import Any, Dict, List, Optional
 import uuid
 from pydantic import BaseModel, Field
-from pymongo import MongoClient, ASCENDING
+from pymongo import MongoClient, ASCENDING, UpdateOne
 from pymongo.database import Database
 from pymongo.collection import Collection
 
@@ -82,10 +82,28 @@ class MongoKnowledgeBase:
     def setup_indexes(self) -> None:
         """Initialize indexes for fast lookups and uniqueness."""
         self.cases.create_index([("id", ASCENDING)], unique=True)
-        self.cases.create_index([("caseNo", ASCENDING)], unique=True)
-        self.cases.create_index([("visitDate", ASCENDING)])
+        self.setup_patient_visits_index()
         self.cases.create_index([("patient.name", ASCENDING)])
         logger.info("MongoDB 'cases' indexes verified.")
+
+    def setup_patient_visits_index(self) -> None:
+        """Initialize unique compound index on (caseNo, visitDate)."""
+        try:
+            index_info = self.cases.index_information()
+            for idx_name, idx_spec in index_info.items():
+                keys = idx_spec.get("key", [])
+                if keys == [("caseNo", 1)] and idx_spec.get("unique"):
+                    self.cases.drop_index(idx_name)
+                    logger.info("Dropped legacy single-field unique index: %s", idx_name)
+        except Exception as exc:
+            logger.warning("Index cleanup warning: %s", exc)
+
+        self.cases.create_index(
+            [("caseNo", ASCENDING), ("visitDate", ASCENDING)],
+            unique=True,
+            name="uniq_caseNo_visitDate",
+        )
+        logger.info("MongoDB 'cases' compound unique index (caseNo, visitDate) verified.")
 
     def ping(self) -> bool:
         """Check if MongoDB sink is healthy and responsive."""
@@ -116,6 +134,53 @@ class MongoKnowledgeBase:
     def find_by_case_no(self, case_no: int) -> Optional[Dict[str, Any]]:
         """Retrieve a specific case by caseNo."""
         return self.cases.find_one({"caseNo": case_no}, {"_id": 0})
+
+    def upsert_patient_visits_batch(self, records: List[Dict[str, Any]]) -> Dict[str, int]:
+        """
+        Bulk upsert/patch patient visit case documents in MongoDB.
+        Uses unique compound key (caseNo, visitDate).
+        Document schema:
+        {
+            "_id": uuid,
+            "caseNo": int/str,
+            "visitDate": date/str,
+            "visitReason": str
+        }
+        """
+        if not records:
+            return {"upserted_count": 0, "modified_count": 0, "matched_count": 0}
+
+        operations = []
+        for rec in records:
+            case_no = rec.get("caseNo")
+            visit_date = rec.get("visitDate")
+            visit_reason = rec.get("visitReason")
+
+            filter_doc = {"caseNo": case_no, "visitDate": visit_date}
+            update_doc = {
+                "$set": {
+                    "caseNo": case_no,
+                    "visitDate": visit_date,
+                    "visitReason": visit_reason,
+                },
+                "$setOnInsert": {
+                    "_id": str(uuid.uuid4())
+                },
+            }
+            operations.append(UpdateOne(filter_doc, update_doc, upsert=True))
+
+        result = self.cases.bulk_write(operations, ordered=False)
+        logger.info(
+            "Batch bulk_write completed: upserted=%d, modified=%d, matched=%d",
+            result.upserted_count,
+            result.modified_count,
+            result.matched_count,
+        )
+        return {
+            "upserted_count": result.upserted_count,
+            "modified_count": result.modified_count,
+            "matched_count": result.matched_count,
+        }
 
     def close(self) -> None:
         """Close MongoDB connection pool."""

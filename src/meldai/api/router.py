@@ -120,3 +120,64 @@ def generate_embeddings(payload: EmbedRequest) -> EmbedResponse:
         dimension=vectors.shape[1] if len(vectors) > 0 else 768,
         embeddings=vectors.tolist(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Migration / Data Ingestion API
+# ---------------------------------------------------------------------------
+
+class PatientVisitMigrationResponse(BaseModel):
+    status: str
+    batch_size: int
+    total_records_processed: int
+    batches_processed: int
+    upserted_count: int
+    modified_count: int
+    matched_count: int
+
+
+@api_router.post("/cases/migrate-patient-visits", response_model=PatientVisitMigrationResponse)
+def migrate_patient_visits(
+    batch_size: int = Query(1000, ge=1, le=10000, description="Batch size for extracting and pushing records"),
+) -> PatientVisitMigrationResponse:
+    """
+    Pull patient visit data from PostgreSQL (temp_migrations.patient_visit_data)
+    in batches of `batch_size` (default 1000) and upsert/patch into MongoDB 'cases' collection
+    using a unique compound index on (caseNo, visitDate).
+    """
+    settings = get_settings()
+    pg = PostgresSource(settings)
+    mongo = MongoKnowledgeBase(settings)
+
+    # Initialize / verify unique compound index on (caseNo, visitDate)
+    mongo.setup_patient_visits_index()
+
+    total_processed = 0
+    batches_count = 0
+    total_upserted = 0
+    total_modified = 0
+    total_matched = 0
+
+    try:
+        for batch in pg.stream_patient_visit_data(batch_size=batch_size):
+            if not batch:
+                continue
+            res = mongo.upsert_patient_visits_batch(batch)
+            total_processed += len(batch)
+            batches_count += 1
+            total_upserted += res.get("upserted_count", 0)
+            total_modified += res.get("modified_count", 0)
+            total_matched += res.get("matched_count", 0)
+
+        return PatientVisitMigrationResponse(
+            status="success",
+            batch_size=batch_size,
+            total_records_processed=total_processed,
+            batches_processed=batches_count,
+            upserted_count=total_upserted,
+            modified_count=total_modified,
+            matched_count=total_matched,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Patient visit migration failed: {str(exc)}")
+

@@ -31,6 +31,12 @@ restart:
 logs:
 	docker compose logs -f
 
+logs-engine:
+	docker compose logs -f app
+
+logs-ui:
+	docker compose logs -f frontend
+
 bash:
 	docker compose run --rm --service-ports app bash
 

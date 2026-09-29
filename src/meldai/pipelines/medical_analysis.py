@@ -113,49 +113,8 @@ class MedicalAnalysisPipeline:
 
         # Demo cohort if PostgreSQL is offline / empty
         if not cases_to_ingest:
-            sample_cases_data = [
-                {
-                    "caseNo": 101,
-                    "visitDate": "2026-09-20",
-                    "name": "John Doe",
-                    "gender": "Male",
-                    "age": (58, 6, 14),
-                    "symptoms": ["chest pain", "substernal chest pressure"],
-                    "diagnosis": ["acute myocardial infarction"],
-                },
-                {
-                    "caseNo": 102,
-                    "visitDate": "2026-09-21",
-                    "name": "Mary Jane",
-                    "gender": "Female",
-                    "age": (47, 2, 5),
-                    "symptoms": ["polyuria", "polydipsia"],
-                    "diagnosis": ["type 2 diabetes mellitus"],
-                },
-                {
-                    "caseNo": 103,
-                    "visitDate": "2026-09-22",
-                    "name": "Robert Smith",
-                    "gender": "Male",
-                    "age": (65, 11, 20),
-                    "symptoms": ["dyspnea", "wheezing"],
-                    "diagnosis": ["chronic obstructive pulmonary disease"],
-                },
-            ]
-
-            for sc in sample_cases_data[:limit]:
-                case_doc = self.process_case(
-                    case_no=sc["caseNo"],
-                    visit_date=sc["visitDate"],
-                    patient_name=sc["name"],
-                    patient_gender=sc["gender"],
-                    age_years=sc["age"][0],
-                    age_months=sc["age"][1],
-                    age_days=sc["age"][2],
-                    symptoms_text=sc["symptoms"],
-                    diagnosis_text=sc["diagnosis"],
-                )
-                cases_to_ingest.append(case_doc)
+            console.print("[red]No cases to ingest. Exiting...")
+            exit(0)
 
         # 2. Sink into MongoDB Knowledge Base
         console.print("💾 [bold yellow]Step 2/2:[/bold yellow] Ingesting validated Case Documents into MongoDB Knowledge Base...")

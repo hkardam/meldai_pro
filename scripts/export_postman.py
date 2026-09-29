@@ -36,6 +36,7 @@ def build_postman_collection() -> Dict[str, Any]:
         "System & Health": [],
         "Clinical NLP & Embeddings": [],
         "Terminology (SNOMED CT)": [],
+        "Data Migration & Sync": [],
     }
 
     # 1. Health Check
@@ -184,6 +185,59 @@ def build_postman_collection() -> Dict[str, Any]:
                                 "definition_status": "PRIMITIVE",
                             }
                         ],
+                        indent=2,
+                    ),
+                }
+            ],
+        }
+    )
+
+    # 4. Patient Visit Migration
+    folders["Data Migration & Sync"].append(
+        {
+            "name": "Migrate Patient Visits (PostgreSQL -> MongoDB)",
+            "request": {
+                "method": "POST",
+                "header": [{"key": "Accept", "value": "application/json", "type": "text"}],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/cases/migrate-patient-visits?batch_size=1000",
+                    "host": ["{{base_url}}"],
+                    "path": ["api", "v1", "cases", "migrate-patient-visits"],
+                    "query": [
+                        {
+                            "key": "batch_size",
+                            "value": "1000",
+                            "description": "Batch size for extracting and pushing records",
+                        }
+                    ],
+                },
+                "description": "Pull patient visit data from PostgreSQL (temp_migrations.patient_visit_data) in batches of 1000 and upsert into MongoDB 'cases' collection with unique (caseNo, visitDate) index.",
+            },
+            "response": [
+                {
+                    "name": "200 OK",
+                    "originalRequest": {
+                        "method": "POST",
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/cases/migrate-patient-visits?batch_size=1000",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "v1", "cases", "migrate-patient-visits"],
+                        },
+                    },
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "header": [{"key": "Content-Type", "value": "application/json"}],
+                    "body": json.dumps(
+                        {
+                            "status": "success",
+                            "batch_size": 1000,
+                            "total_records_processed": 1386,
+                            "batches_processed": 2,
+                            "upserted_count": 1386,
+                            "modified_count": 0,
+                            "matched_count": 0,
+                        },
                         indent=2,
                     ),
                 }
