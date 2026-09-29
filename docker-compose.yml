@@ -1,0 +1,65 @@
+services:
+  # ============================================================================
+  # MeldAI Application (SapBERT Embeddings, HPO & MONDO Offline Terminology)
+  # ============================================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meldai_app
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: [ "python", "-m", "meldai.main", "serve", "--host", "0.0.0.0", "--port", "8000" ]
+    ports:
+      - "5678:5678" # debugpy remote debugging port for VS Code / IDE
+      - "8000:8000" # Web App API port (FastAPI)
+    volumes:
+      # Mount the workspace directly for instant live editing & debugging
+      - ./:/app
+      # Persistent cache on host for Hugging Face models (SapBERT)
+      - ./cache/huggingface:/app/cache/huggingface
+      # Offline ontology OBO files (hp.obo, mondo.obo)
+      # Run: make download-ontologies  or  docker compose run --rm app python scripts/download_ontologies.py
+      - ./data/ontologies:/app/data/ontologies
+    stdin_open: true
+    tty: true
+    # Allows container to access PostgreSQL running on the host machine via host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - meldai_network
+
+  # ============================================================================
+  # MongoDB (Internal Sink & Clinical Knowledge Base)
+  # ============================================================================
+  mongodb:
+    image: mongo:7.0
+    container_name: meldai_mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-admin_secure_pass}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: [ "CMD-SHELL", "mongosh --eval 'db.runCommand(\"ping\").ok' --quiet || exit 1" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - meldai_network
+
+volumes:
+  mongo_data:
+    name: meldai_mongo_data
+
+networks:
+  meldai_network:
+    name: meldai_network
+    driver: bridge

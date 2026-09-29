@@ -1,0 +1,224 @@
+{
+  "info": {
+    "_postman_id": "7f8c12a4-569d-4e9b-b8f2-39c8194ad901",
+    "name": "MeldAI Clinical Intelligence Platform API",
+    "description": "REST API for medical data analysis, SapBERT embeddings, HPO and MONDO terminology",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": "0.2.0"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string",
+      "description": "Base URL of the MeldAI FastAPI web service"
+    }
+  ],
+  "item": [
+    {
+      "name": "System & Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "health"
+              ]
+            },
+            "description": "Check connectivity to PostgreSQL, MongoDB, and Snowstorm."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/health",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "health"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"online\",\n  \"environment\": \"development\",\n  \"services\": {\n    \"postgres\": false,\n    \"mongodb\": true,\n    \"snowstorm\": true\n  }\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Clinical NLP & Embeddings",
+      "item": [
+        {
+          "name": "Generate SapBERT Embeddings",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"terms\": [\n    \"acute myocardial infarction\",\n    \"chest pain\",\n    \"substernal pressure\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/embed",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "embed"
+              ]
+            },
+            "description": "Generate dense SapBERT clinical embeddings for given medical phrases."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/embed",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "embed"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"terms\": [\n    \"acute myocardial infarction\",\n    \"chest pain\"\n  ],\n  \"dimension\": 768,\n  \"embeddings\": [\n    [\n      -0.0312,\n      0.0541,\n      0.0124,\n      -0.0194\n    ],\n    [\n      0.017,\n      0.0357,\n      -0.0203,\n      -0.0452\n    ]\n  ]\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Terminology (SNOMED CT)",
+      "item": [
+        {
+          "name": "Search SNOMED CT Concept",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/snomed/search?term=chest%20pain&limit=5",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "snomed",
+                "search"
+              ],
+              "query": [
+                {
+                  "key": "term",
+                  "value": "chest pain",
+                  "description": "Clinical diagnosis or symptom term (minimum 2 characters)"
+                },
+                {
+                  "key": "limit",
+                  "value": "5",
+                  "description": "Maximum concept matches to return"
+                }
+              ]
+            },
+            "description": "Search SNOMED CT terminology via Snowstorm."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/snomed/search?term=chest%20pain&limit=5",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "snomed",
+                    "search"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "[\n  {\n    \"concept_id\": \"29857009\",\n    \"fsn\": \"Chest pain (finding)\",\n    \"preferred_term\": \"Chest pain\",\n    \"semantic_tag\": \"finding\",\n    \"score\": 1.0,\n    \"definition_status\": \"PRIMITIVE\"\n  }\n]"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
