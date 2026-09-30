@@ -37,6 +37,14 @@ class ClinicalEntityItem(BaseModel):
     embedding: List[float] = Field(..., description="768-dimensional SapBERT embedding vector")
 
 
+class DiagnosisItem(BaseModel):
+    """Diagnosis entity item patched into MongoDB case documents."""
+    term: str = Field(..., description="Diagnosis surface form from database")
+    mondoCode: Optional[int] = Field(default=None, description="Numeric MONDO ontology code")
+    embedding: List[float] = Field(default_factory=list, description="768-dimensional SapBERT embedding vector")
+
+
+
 class CaseDocument(BaseModel):
     """
     Standard Medical Case Document stored in MongoDB knowledge base.
@@ -182,8 +190,42 @@ class MongoKnowledgeBase:
             "matched_count": result.matched_count,
         }
 
+    def replace_case_diagnoses_batch(self, records: List[Dict[str, Any]]) -> Dict[str, int]:
+        """
+        Bulk patch/replace the 'diagnosis' array for matched patient visit case documents in MongoDB.
+        Uses unique compound key (caseNo, visitDate).
+        """
+        if not records:
+            return {"modified_count": 0, "matched_count": 0}
+
+        operations = []
+        for rec in records:
+            case_no = rec.get("caseNo")
+            visit_date = rec.get("visitDate")
+            diagnosis = rec.get("diagnosis", [])
+
+            filter_doc = {"caseNo": case_no, "visitDate": visit_date}
+            update_doc = {
+                "$set": {
+                    "diagnosis": diagnosis,
+                }
+            }
+            operations.append(UpdateOne(filter_doc, update_doc))
+
+        result = self.cases.bulk_write(operations, ordered=False)
+        logger.info(
+            "Diagnosis batch replace completed: modified=%d, matched=%d",
+            result.modified_count,
+            result.matched_count,
+        )
+        return {
+            "modified_count": result.modified_count,
+            "matched_count": result.matched_count,
+        }
+
     def close(self) -> None:
         """Close MongoDB connection pool."""
         if self._client:
             self._client.close()
             self._client = None
+

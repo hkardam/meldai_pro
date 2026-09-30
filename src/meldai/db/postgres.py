@@ -115,8 +115,57 @@ class PostgresSource:
                 logger.info("Fetched batch of %d records from PostgreSQL", len(batch))
                 yield batch
 
+    def stream_grouped_patient_diagnoses(self, batch_size: int = 1000):
+        """
+        Extract patient diagnosis data grouped by Case No and Visit Date from 'temp_migrations.patient_diagnosis_data'.
+        Aggregates distinct diagnosis names into an array per encounter.
+        Yields list of dicts for each batch: [{"caseNo": int/str, "visitDate": str, "diagnosisNames": list[str]}].
+        """
+        query = text("""
+            SELECT
+                pdd."Case No",
+                pdd."Visit Date",
+                ARRAY_AGG(DISTINCT pdd."Diagnosis Name") AS diagnosis_names
+            FROM temp_migrations.patient_diagnosis_data pdd
+            WHERE pdd."Diagnosis Name" IS NOT NULL AND TRIM(pdd."Diagnosis Name") != ''
+            GROUP BY pdd."Case No", pdd."Visit Date"
+            ORDER BY pdd."Case No"
+        """)
+
+        def _parse_case_no(val: Optional[str]) -> Any:
+            if val is None:
+                return 0
+            if isinstance(val, int):
+                return val
+            s_val = str(val).strip()
+            if s_val.isdigit():
+                return int(s_val)
+            digits = "".join(filter(str.isdigit, s_val))
+            if digits:
+                return int(digits)
+            return s_val
+
+        with self.engine.connect() as conn:
+            result = conn.execution_options(yield_per=batch_size).execute(query)
+            while True:
+                rows = result.fetchmany(batch_size)
+                if not rows:
+                    break
+                batch = []
+                for row in rows:
+                    raw_case_no, visit_date, diagnosis_names = row[0], row[1], row[2]
+                    case_no = _parse_case_no(raw_case_no)
+                    batch.append({
+                        "caseNo": case_no,
+                        "visitDate": visit_date,
+                        "diagnosisNames": list(diagnosis_names) if diagnosis_names else [],
+                    })
+                logger.info("Fetched batch of %d grouped diagnosis records from PostgreSQL", len(batch))
+                yield batch
+
     def close(self) -> None:
         """Dispose of the connection pool."""
         if self._engine:
             self._engine.dispose()
             self._engine = None
+

@@ -245,6 +245,61 @@ def build_postman_collection() -> Dict[str, Any]:
         }
     )
 
+    # 5. Patient Diagnosis Migration
+    folders["Data Migration & Sync"].append(
+        {
+            "name": "Migrate Patient Diagnoses (PostgreSQL -> MongoDB)",
+            "request": {
+                "method": "POST",
+                "header": [{"key": "Accept", "value": "application/json", "type": "text"}],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/cases/migrate-patient-diagnoses?batch_size=1000",
+                    "host": ["{{base_url}}"],
+                    "path": ["api", "v1", "cases", "migrate-patient-diagnoses"],
+                    "query": [
+                        {
+                            "key": "batch_size",
+                            "value": "1000",
+                            "description": "Batch size for extracting and pushing diagnosis records",
+                        }
+                    ],
+                },
+                "description": "Pull grouped patient diagnosis data from PostgreSQL (temp_migrations.patient_diagnosis_data) using ARRAY_AGG(DISTINCT 'Diagnosis Name'), resolve MONDO codes and SapBERT embeddings, and replace the 'diagnosis' array on matching MongoDB 'cases' documents.",
+            },
+            "response": [
+                {
+                    "name": "200 OK",
+                    "originalRequest": {
+                        "method": "POST",
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/cases/migrate-patient-diagnoses?batch_size=1000",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "v1", "cases", "migrate-patient-diagnoses"],
+                        },
+                    },
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "header": [{"key": "Content-Type", "value": "application/json"}],
+                    "body": json.dumps(
+                        {
+                            "status": "success",
+                            "batch_size": 1000,
+                            "total_encounters_processed": 523,
+                            "batches_processed": 1,
+                            "modified_count": 523,
+                            "matched_count": 523,
+                            "unique_terms_indexed": 57,
+                            "execution_time_seconds": 1.452,
+                        },
+                        indent=2,
+                    ),
+                }
+            ],
+        }
+    )
+
+
     for folder_name, items in folders.items():
         collection["item"].append(
             {
