@@ -85,6 +85,17 @@ class PatientMedicationMigrationResponse(BaseModel):
     execution_time_seconds: float
 
 
+class PatientDemographicsMigrationResponse(BaseModel):
+    status: str
+    batch_size: int
+    total_records_processed: int
+    batches_processed: int
+    modified_count: int
+    matched_count: int
+    execution_time_seconds: float
+
+
+
 class ChiefComplaintsRunStatusResponse(BaseModel):
     status: str
     batch_size: int

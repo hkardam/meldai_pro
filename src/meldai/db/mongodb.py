@@ -303,6 +303,49 @@ class MongoKnowledgeBase:
             "matched_count": result.matched_count,
         }
 
+    def find_cases_by_case_nos_batch(
+        self, case_nos: List[Any]
+    ) -> Dict[Any, List[Dict[str, Any]]]:
+        """Fetch multiple case documents in a single round-trip by matching caseNo.
+
+        Returns a dictionary mapping caseNo -> list of docs (since multiple visits may share caseNo).
+        """
+        if not case_nos:
+            return {}
+        valid_case_nos = [c for c in case_nos if c is not None]
+        if not valid_case_nos:
+            return {}
+        cursor = self.cases.find(
+            {"caseNo": {"$in": valid_case_nos}},
+            {"_id": 1, "caseNo": 1}
+        )
+        result: Dict[Any, List[Dict[str, Any]]] = {}
+        for doc in cursor:
+            cn = doc.get("caseNo")
+            result.setdefault(cn, []).append(doc)
+        return result
+
+    def update_cases_demographics_bulk(
+        self, updates: List[Tuple[Any, Dict[str, Any]]]
+    ) -> Dict[str, int]:
+        """Bulk non-destructively patch patientInfo on multiple case documents.
+
+        Uses the MongoDB $set operator so ONLY the 'patientInfo' field is updated.
+        Existing fields (diagnosis, symptoms, medications, visitReason, etc.) are strictly preserved.
+        """
+        if not updates:
+            return {"modified_count": 0, "matched_count": 0}
+
+        operations = [
+            UpdateOne({"_id": doc_id}, {"$set": {"patientInfo": patient_info}})
+            for doc_id, patient_info in updates
+        ]
+        result = self.cases.bulk_write(operations, ordered=False)
+        return {
+            "modified_count": result.modified_count,
+            "matched_count": result.matched_count,
+        }
+
     def close(self) -> None:
         """Close MongoDB connection pool."""
         if self._client:

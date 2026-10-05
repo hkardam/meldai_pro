@@ -488,3 +488,82 @@ class MigrationService:
             "execution_time_seconds": exec_time,
         }
 
+    def migrate_patient_demographics(self, batch_size: int = 1000) -> Dict[str, Any]:
+        """
+        Pull patient demographics from PostgreSQL in batches, match case documents in
+        MongoDB using caseNo, and patch the 'patientInfo' field: {age: float, gender: 'm' | 'f'}.
+        """
+        start_time = time.time()
+        total_records = 0
+        batches_count = 0
+        total_modified = 0
+        total_matched = 0
+
+        total_pg_records = 0
+        try:
+            count_val = self._pg.get_patient_demographics_count()
+            if isinstance(count_val, int):
+                total_pg_records = count_val
+        except Exception as exc:
+            logger.warning("Could not determine total patient demographics count: %s", exc)
+
+        batches = self._pg.stream_patient_demographics(batch_size=batch_size)
+        if total_pg_records > 0:
+            total_batches = math.ceil(total_pg_records / batch_size)
+        elif isinstance(batches, (list, tuple)):
+            total_batches = len(batches)
+        else:
+            total_batches = 0
+
+        for batch in batches:
+            if not batch:
+                continue
+
+            batches_count += 1
+            total_records += len(batch)
+
+            case_nos = [rec["caseNo"] for rec in batch]
+            docs_map = self._mongo.find_cases_by_case_nos_batch(case_nos)
+
+            updates: List[Tuple[Any, Dict[str, Any]]] = []
+            for rec in batch:
+                c_no = rec["caseNo"]
+                matched_docs = docs_map.get(c_no, [])
+                for doc in matched_docs:
+                    updates.append((doc["_id"], rec["patientInfo"]))
+
+            if updates:
+                res = self._mongo.update_cases_demographics_bulk(updates)
+                total_modified += res.get("modified_count", 0)
+                total_matched += res.get("matched_count", 0)
+
+            logger.info(
+                "Completed patient demographics migration batch %d/%d (batch_size=%d, matched=%d, modified=%d)",
+                batches_count,
+                total_batches or batches_count,
+                len(batch),
+                len(updates),
+                total_modified,
+            )
+
+        exec_time = round(time.time() - start_time, 3)
+        logger.info(
+            "Patient demographics migration finished: total_records=%d batches=%d modified=%d matched=%d elapsed=%.3fs",
+            total_records,
+            batches_count,
+            total_modified,
+            total_matched,
+            exec_time,
+        )
+
+        return {
+            "status": "success",
+            "batch_size": batch_size,
+            "total_records_processed": total_records,
+            "batches_processed": batches_count,
+            "modified_count": total_modified,
+            "matched_count": total_matched,
+            "execution_time_seconds": exec_time,
+        }
+
+

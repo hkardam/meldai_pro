@@ -302,6 +302,87 @@ class PostgresSource:
         with self.engine.connect() as conn:
             return conn.execute(query).scalar() or 0
 
+    def stream_patient_demographics(self, batch_size: int = 1000):
+        """
+        Extract patient demographics from 'temp_migrations.patient_data'.
+        Yields list of dicts for each batch:
+        [{"caseNo": int/str, "patientInfo": {"age": float, "gender": "m" | "f"}}].
+        """
+        query = text("""
+            SELECT 
+                pd."case No", 
+                pd."Gender", 
+                pd."Age Day", 
+                pd."Age Month", 
+                pd."Age Year" 
+            FROM temp_migrations.patient_data pd 
+            ORDER BY "case No"
+        """)
+
+        def _parse_case_no(val: Optional[str]) -> Any:
+            if val is None:
+                return 0
+            if isinstance(val, int):
+                return val
+            s_val = str(val).strip()
+            if s_val.isdigit():
+                return int(s_val)
+            digits = "".join(filter(str.isdigit, s_val))
+            if digits:
+                return int(digits)
+            return s_val
+
+        def _parse_age(year: Any, month: Any, day: Any) -> float:
+            try:
+                y = float(year) if year is not None else 0.0
+            except (ValueError, TypeError):
+                y = 0.0
+            try:
+                m = float(month) if month is not None else 0.0
+            except (ValueError, TypeError):
+                m = 0.0
+            try:
+                d = float(day) if day is not None else 0.0
+            except (ValueError, TypeError):
+                d = 0.0
+            return round(y + (m / 12.0) + (d / 365.25), 2)
+
+        def _parse_gender(val: Any) -> str:
+            if not val:
+                return "m"
+            s = str(val).strip().lower()
+            if s.startswith("f"):
+                return "f"
+            return "m"
+
+        with self.engine.connect() as conn:
+            result = conn.execution_options(yield_per=batch_size).execute(query)
+            while True:
+                rows = result.fetchmany(batch_size)
+                if not rows:
+                    break
+                batch = []
+                for row in rows:
+                    raw_case_no, gender, age_day, age_month, age_year = row[0], row[1], row[2], row[3], row[4]
+                    case_no = _parse_case_no(raw_case_no)
+                    age = _parse_age(age_year, age_month, age_day)
+                    g = _parse_gender(gender)
+                    batch.append({
+                        "caseNo": case_no,
+                        "patientInfo": {
+                            "age": age,
+                            "gender": g,
+                        }
+                    })
+                logger.info("Fetched batch of %d patient demographic records from PostgreSQL", len(batch))
+                yield batch
+
+    def get_patient_demographics_count(self) -> int:
+        """Get total record count for patient demographics data in PostgreSQL."""
+        query = text('SELECT COUNT(*) FROM temp_migrations.patient_data')
+        with self.engine.connect() as conn:
+            return conn.execute(query).scalar() or 0
+
     def close(self) -> None:
         """Dispose of the connection pool."""
         if self._engine:

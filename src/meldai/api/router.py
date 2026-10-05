@@ -16,6 +16,7 @@ from meldai.api.res_dtos import (
     EmbedResponse,
     HPOMatchItem,
     MONDOMatchItem,
+    PatientDemographicsMigrationResponse,
     PatientDiagnosisMigrationResponse,
     PatientMedicationMigrationResponse,
     PatientVisitMigrationResponse,
@@ -23,6 +24,7 @@ from meldai.api.res_dtos import (
     SymptomItem,
     SymptomMatchResult,
 )
+
 from meldai.config import get_settings
 from meldai.db.mongodb import MongoKnowledgeBase
 from meldai.db.postgres import PostgresSource
@@ -269,6 +271,30 @@ def migrate_patient_prescriptions(
     except Exception as exc:
         logger.error("Patient prescription migration failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Patient prescription migration failed: {str(exc)}")
+
+
+# ---------------------------------------------------------------------------
+# Patient Demographics Migration (PostgreSQL -> MongoDB)
+# ---------------------------------------------------------------------------
+
+@api_router.post("/cases/migrate-patient-demographics", response_model=PatientDemographicsMigrationResponse)
+def migrate_patient_demographics(
+    batch_size: int = Query(1000, ge=1, le=10000, description="Batch size for extracting and pushing records"),
+) -> PatientDemographicsMigrationResponse:
+    """Stream patient demographic data from PostgreSQL and patch MongoDB case documents with patientInfo field.
+
+    Non-destructive patching:
+    Patches only the 'patientInfo' field ({age: float, gender: 'm' | 'f'}) using MongoDB $set operator,
+    matching case documents on 'caseNo'.
+    """
+    try:
+        migration_svc = _get_migration_service()
+        result = migration_svc.migrate_patient_demographics(batch_size=batch_size)
+        return PatientDemographicsMigrationResponse(**result)
+    except Exception as exc:
+        logger.error("Patient demographics migration failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Patient demographics migration failed: {str(exc)}")
+
 
 
 
