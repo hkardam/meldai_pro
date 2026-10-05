@@ -290,3 +290,59 @@ def test_migrate_patient_chief_complaints_failure_raises_500():
     assert resp.status_code == 500
     assert "PostgreSQL connection lost" in resp.json()["detail"]
 
+
+def test_find_similar_cases_endpoint():
+    mock_case_svc = MagicMock()
+    mock_case_svc.find_similar_cases.return_value = {
+        "decoratedCase": {
+            "caseNo": 999,
+            "patientInfo": {"age": 50, "gender": "Female"},
+            "symptoms": [
+                {
+                    "term": "lack of sleep",
+                    "hpoTerm": "Insomnia",
+                    "hpoCode": 2360,
+                    "embedding": [0.1] * 768,
+                    "isNegation": False,
+                    "isPheno": True,
+                    "similarity": None,
+                }
+            ],
+            "diagnosis": [
+                {
+                    "term": "Insomia",
+                    "mondoTerm": "insomnia",
+                    "mondoCode": 8807,
+                    "embedding": [0.1] * 768,
+                    "similarity": None,
+                }
+            ],
+        },
+        "similarCases": [],
+    }
+
+    with patch("meldai.api.router._get_case_service", return_value=mock_case_svc):
+        payload = {
+            "caseNo": 999,
+            "patientInfo": {"age": 50, "gender": "Female"},
+            "symptoms": ["lack of sleep"],
+            "diagnosis": ["Insomia"],
+        }
+        resp = client.post("/api/v1/cases/find-similar", json=payload)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "decoratedCase" in data
+    assert data["decoratedCase"]["caseNo"] == 999
+    assert data["decoratedCase"]["patientInfo"]["age"] == 50
+    assert data["decoratedCase"]["patientInfo"]["gender"] == "Female"
+    assert len(data["decoratedCase"]["symptoms"]) == 1
+    assert data["decoratedCase"]["symptoms"][0]["term"] == "lack of sleep"
+    assert data["decoratedCase"]["symptoms"][0]["hpoCode"] == 2360
+    assert len(data["decoratedCase"]["symptoms"][0]["embedding"]) == 768
+    assert len(data["decoratedCase"]["diagnosis"]) == 1
+    assert data["decoratedCase"]["diagnosis"][0]["term"] == "Insomia"
+    assert data["decoratedCase"]["diagnosis"][0]["mondoCode"] == 8807
+    assert len(data["decoratedCase"]["diagnosis"][0]["embedding"]) == 768
+    assert data["similarCases"] == []
+

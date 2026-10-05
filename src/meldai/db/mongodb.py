@@ -44,6 +44,20 @@ class DiagnosisItem(BaseModel):
     embedding: List[float] = Field(default_factory=list, description="768-dimensional SapBERT embedding vector")
 
 
+class CaseSymptomItem(BaseModel):
+    """Symptom entity item patched into MongoDB case documents."""
+    term: str = Field(..., description="Cleaned symptom term or phrase")
+    hpoTerm: Optional[str] = Field(default=None, description="Matched HPO concept label")
+    hpoId: Optional[str] = Field(default=None, description="HPO CURIE identifier e.g. HP:0002315")
+    hpoCode: Optional[int] = Field(default=None, description="Numeric HPO code e.g. 2315")
+    isNegation: bool = Field(default=False, description="Whether symptom is negated")
+    isPheno: bool = Field(default=True, description="Whether entity represents a clinical phenotype")
+    assertionStatus: str = Field(default="affirmed", description="Assertion status")
+    matchScore: Optional[float] = Field(default=None, description="Similarity score with HPO concept")
+    matchType: Optional[str] = Field(default=None, description="HPO match classification")
+    embedding: List[float] = Field(default_factory=list, description="768-dimensional SapBERT embedding vector")
+
+
 
 class CaseDocument(BaseModel):
     """

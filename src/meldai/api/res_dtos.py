@@ -1,6 +1,6 @@
 """FastAPI response DTO schemas."""
 
-from typing import List, Optional
+from typing import Any, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -114,3 +114,38 @@ class ChiefComplaintsActionResponse(BaseModel):
     status: str
     message: str
     batch_size: Optional[int] = None
+
+
+class DecoratedSymptomItem(BaseModel):
+    term: str = Field(..., description="Original clinical symptom string")
+    hpoTerm: Optional[str] = Field(default=None, description="Matched HPO concept label")
+    hpoCode: Optional[int] = Field(default=None, description="Numeric HPO code e.g. 2360")
+    embedding: Optional[List[float]] = Field(default=None, description="Vector embedding")
+    isNegation: bool = Field(default=False, description="Whether symptom is negated")
+    isPheno: bool = Field(default=True, description="Whether entity represents a clinical phenotype")
+    similarity: Optional[float] = Field(default=None, description="Similarity score")
+
+
+class DecoratedDiagnosisItem(BaseModel):
+    term: str = Field(..., description="Original clinical diagnosis string")
+    mondoTerm: Optional[str] = Field(default=None, description="Matched MONDO concept label")
+    mondoCode: Optional[int] = Field(default=None, description="Numeric MONDO code e.g. 8807")
+    embedding: Optional[List[float]] = Field(default=None, description="Vector embedding")
+    similarity: Optional[float] = Field(default=None, description="Similarity score")
+
+
+class DecoratedPatientInfo(BaseModel):
+    age: Optional[float] = Field(default=None, description="Patient age in years")
+    gender: Optional[str] = Field(default=None, description="Patient gender")
+
+
+class DecoratedCase(BaseModel):
+    caseNo: Optional[int] = Field(default=None, description="Case number or null")
+    patientInfo: DecoratedPatientInfo = Field(default_factory=DecoratedPatientInfo)
+    symptoms: List[DecoratedSymptomItem] = Field(default_factory=list)
+    diagnosis: List[DecoratedDiagnosisItem] = Field(default_factory=list)
+
+
+class FindSimilarCaseResponse(BaseModel):
+    decoratedCase: DecoratedCase
+    similarCases: List[Any] = Field(default_factory=list, description="List of similar cases found")

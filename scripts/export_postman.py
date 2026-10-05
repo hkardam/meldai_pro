@@ -37,6 +37,7 @@ def build_postman_collection() -> Dict[str, Any]:
         "Clinical NLP & Embeddings": [],
         "Terminology (HPO & MONDO)": [],
         "Data Migration & Sync": [],
+        "Case Similarity & Search": [],
     }
 
     # 1. Health Check
@@ -647,6 +648,100 @@ def build_postman_collection() -> Dict[str, Any]:
                             "start_time": 1728120000.0,
                             "elapsed_seconds": 3.8,
                             "error": None,
+                        },
+                        indent=2,
+                    ),
+                }
+            ],
+        }
+    )
+
+    # 13. Find Similar Cases
+    folders["Case Similarity & Search"].append(
+        {
+            "name": "Find Similar Cases",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json", "type": "text"},
+                    {"key": "Accept", "value": "application/json", "type": "text"},
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": json.dumps(
+                        {
+                            "caseNo": 101,
+                            "patientInfo": {
+                                "age": 45.0,
+                                "gender": "Male",
+                            },
+                            "symptoms": ["lack of sleep", "no fever"],
+                            "diagnosis": ["Insomia"],
+                        },
+                        indent=2,
+                    ),
+                },
+                "url": {
+                    "raw": "{{base_url}}/api/v1/cases/find-similar",
+                    "host": ["{{base_url}}"],
+                    "path": ["api", "v1", "cases", "find-similar"],
+                },
+                "description": "Decorate clinical case with HPO/MONDO concepts and retrieve similar cases.",
+            },
+            "response": [
+                {
+                    "name": "200 OK",
+                    "originalRequest": {
+                        "method": "POST",
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/cases/find-similar",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "v1", "cases", "find-similar"],
+                        },
+                    },
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "header": [{"key": "Content-Type", "value": "application/json"}],
+                    "body": json.dumps(
+                        {
+                            "decoratedCase": {
+                                "caseNo": 101,
+                                "patientInfo": {
+                                    "age": 45.0,
+                                    "gender": "Male",
+                                },
+                                "symptoms": [
+                                    {
+                                        "term": "lack of sleep",
+                                        "hpoTerm": "Sleep disturbance",
+                                        "hpoCode": 2360,
+                                        "embedding": None,
+                                        "isNegation": False,
+                                        "isPheno": True,
+                                        "similarity": None,
+                                    },
+                                    {
+                                        "term": "no fever",
+                                        "hpoTerm": "Fever",
+                                        "hpoCode": 1945,
+                                        "embedding": None,
+                                        "isNegation": True,
+                                        "isPheno": False,
+                                        "similarity": None,
+                                    },
+                                ],
+                                "diagnosis": [
+                                    {
+                                        "term": "Insomia",
+                                        "mondoTerm": "insomnia (disease)",
+                                        "mondoCode": 8807,
+                                        "embedding": None,
+                                        "similarity": None,
+                                    },
+                                ],
+                            },
+                            "similarCases": [],
                         },
                         indent=2,
                     ),

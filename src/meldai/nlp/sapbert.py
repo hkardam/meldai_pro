@@ -99,3 +99,14 @@ class SapBERTEmbedder:
         if norm_a == 0 or norm_b == 0:
             return 0.0
         return float(dot / (norm_a * norm_b))
+
+
+_embedder_instance: Optional[SapBERTEmbedder] = None
+
+
+def get_sapbert_embedder(settings: Optional[Settings] = None) -> SapBERTEmbedder:
+    """Get or create singleton SapBERTEmbedder instance."""
+    global _embedder_instance
+    if _embedder_instance is None:
+        _embedder_instance = SapBERTEmbedder(settings)
+    return _embedder_instance

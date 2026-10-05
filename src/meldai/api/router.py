@@ -7,6 +7,7 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from meldai.api.req_dtos import (
     BatchSymptomMatchRequest,
     EmbedRequest,
+    FindSimilarCaseRequest,
     SegmentSymptomsRequest,
 )
 from meldai.api.res_dtos import (
@@ -14,6 +15,7 @@ from meldai.api.res_dtos import (
     ChiefComplaintsActionResponse,
     ChiefComplaintsRunStatusResponse,
     EmbedResponse,
+    FindSimilarCaseResponse,
     HPOMatchItem,
     MONDOMatchItem,
     PatientDemographicsMigrationResponse,
@@ -29,8 +31,9 @@ from meldai.config import get_settings
 from meldai.db.mongodb import MongoKnowledgeBase
 from meldai.db.postgres import PostgresSource
 from meldai.nlp.medspacy_nlp import get_medspacy_service
-from meldai.nlp.sapbert import SapBERTEmbedder
+from meldai.nlp.sapbert import SapBERTEmbedder, get_sapbert_embedder
 from meldai.services.assertion_service import ClinicalAssertionService
+from meldai.services.case_service import CaseService
 from meldai.services.chief_complaints_runner import get_chief_complaints_runner
 from meldai.services.migration_service import MigrationService
 from meldai.services.symptom_service import SymptomService
@@ -77,6 +80,22 @@ def _get_symptom_service() -> SymptomService:
         assertion_service=assertion,
         hpo_service=hpo,
         mondo_service=mondo,
+    )
+
+
+def _get_case_service() -> CaseService:
+    settings = get_settings()
+    nlp = get_medspacy_service()
+    hpo = get_hpo_service(settings.hpo_obo_path)
+    mondo = get_mondo_service(settings.mondo_obo_path)
+    assertion = ClinicalAssertionService(nlp_service=nlp)
+    embedder = get_sapbert_embedder(settings)
+    return CaseService(
+        settings=settings,
+        assertion_service=assertion,
+        hpo_service=hpo,
+        mondo_service=mondo,
+        embedder=embedder,
     )
 
 
@@ -174,7 +193,7 @@ def search_mondo(
 def generate_embeddings(payload: EmbedRequest) -> EmbedResponse:
     """Generate 768-d SapBERT dense clinical embeddings for provided terms."""
     try:
-        embedder = SapBERTEmbedder()
+        embedder = get_sapbert_embedder()
         vectors = embedder.embed_entities(payload.terms)
         return EmbedResponse(
             terms=payload.terms,
@@ -364,6 +383,27 @@ def match_symptoms_batch(
     except Exception as exc:
         logger.error("Batch symptom matching failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Batch symptom matching failed: {str(exc)}")
+
+
+# ---------------------------------------------------------------------------
+# Similar Cases Search & Case Decoration
+# ---------------------------------------------------------------------------
+
+@api_router.post(
+    "/cases/find-similar",
+    response_model=FindSimilarCaseResponse,
+    summary="Decorate a clinical case and find similar cases",
+)
+def find_similar_cases(
+    payload: FindSimilarCaseRequest,
+) -> FindSimilarCaseResponse:
+    """Enrich case symptoms and diagnoses with HPO/MONDO terms and retrieve similar cases."""
+    try:
+        case_svc = _get_case_service()
+        return case_svc.find_similar_cases(payload)
+    except Exception as exc:
+        logger.error("Find similar cases failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Find similar cases failed: {str(exc)}")
 
 
 

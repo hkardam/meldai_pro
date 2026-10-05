@@ -1,10 +1,13 @@
 """Unit tests for MeldAI service layer and non-destructive MongoDB patching."""
 
 from unittest.mock import MagicMock
+import numpy as np
 import pytest
 
+from meldai.api.req_dtos import FindSimilarCaseRequest, PatientInfoInput
 from meldai.nlp.medspacy_nlp import SegmentResult
 from meldai.services.assertion_service import ClinicalAssertionService
+from meldai.services.case_service import CaseService
 from meldai.services.migration_service import MigrationService
 from meldai.services.symptom_service import SymptomService
 from meldai.services.terminology_service import TerminologySearchService
@@ -199,10 +202,14 @@ def test_migration_service_preserves_diagnosis_and_other_fields():
         "assertion_status": "affirmed",
     }
 
+    mock_embedder = MagicMock()
+    mock_embedder.embed_entities.return_value = np.zeros((2, 768))
+
     migration_svc = MigrationService(
         postgres_source=mock_pg,
         mongo_kb=mock_mongo,
         symptom_service=mock_symptom_svc,
+        embedder=mock_embedder,
     )
 
     result = migration_svc.load_chief_complaints(batch_size=50)
@@ -256,10 +263,14 @@ def test_migration_service_batch_progress_logging(caplog):
     mock_symptom_svc = MagicMock()
     mock_symptom_svc.resolve_symptom.return_value = {"note": "headache", "hpoCode": 1, "mondoCode": 2}
 
+    mock_embedder = MagicMock()
+    mock_embedder.embed_entities.return_value = np.zeros((1, 768))
+
     migration_svc = MigrationService(
         postgres_source=mock_pg,
         mongo_kb=mock_mongo,
         symptom_service=mock_symptom_svc,
+        embedder=mock_embedder,
     )
 
     with caplog.at_level(logging.INFO):
@@ -282,4 +293,94 @@ def test_migration_service_batch_progress_logging(caplog):
         res_cc = migration_svc.load_chief_complaints(batch_size=100)
         assert res_cc["batches_processed"] == 1
         assert "Patient chief complaints migration: completed batch 1 of 2" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# 6. CaseService tests
+# ---------------------------------------------------------------------------
+
+def test_case_service_decorate_and_find_similar():
+    mock_nlp = MagicMock()
+    # Mock NLP analyze for symptom "lack of sleep" and "no fever"
+    def mock_analyze(term):
+        if "no fever" in term:
+            return _make_mock_doc(term, ent_text="fever", is_negated=True)
+        return _make_mock_doc(term, ent_text=term, is_negated=False)
+
+    mock_nlp.analyze.side_effect = mock_analyze
+    assertion_svc = ClinicalAssertionService(nlp_service=mock_nlp)
+
+    mock_hpo = MagicMock()
+    mock_hpo.search.side_effect = lambda term, limit=1: [
+        HPOResult(
+            hpo_id="HP:0002360",
+            label="Sleep disturbance",
+            match_type="fuzzy_label",
+            score=0.9,
+        )
+    ] if "sleep" in term else []
+
+    mock_mondo = MagicMock()
+    mock_mondo.search.side_effect = lambda term, limit=1: [
+        MONDOResult(
+            mondo_id="MONDO:0008807",
+            label="insomnia (disease)",
+            match_type="fuzzy_label",
+            score=0.95,
+        )
+    ] if "insomia" in term.lower() or "insomnia" in term.lower() else []
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_entities.side_effect = lambda terms: np.ones((len(terms), 768), dtype=np.float32)
+
+    case_svc = CaseService(
+        assertion_service=assertion_svc,
+        hpo_service=mock_hpo,
+        mondo_service=mock_mondo,
+        embedder=mock_embedder,
+    )
+
+    req = FindSimilarCaseRequest(
+        caseNo=101,
+        patientInfo=PatientInfoInput(age=45.0, gender="Male"),
+        symptoms=["lack of sleep", "no fever"],
+        diagnosis=["Insomia"],
+    )
+
+    res = case_svc.find_similar_cases(req)
+    assert res.similarCases == []
+
+    dec_case = res.decoratedCase
+    assert dec_case.caseNo == 101
+    assert dec_case.patientInfo.age == 45.0
+    assert dec_case.patientInfo.gender == "Male"
+
+    # Symptom 1: lack of sleep
+    assert len(dec_case.symptoms) == 2
+    s1 = dec_case.symptoms[0]
+    assert s1.term == "lack of sleep"
+    assert s1.hpoTerm == "Sleep disturbance"
+    assert s1.hpoCode == 2360
+    assert isinstance(s1.embedding, list)
+    assert len(s1.embedding) == 768
+    assert s1.isNegation is False
+    assert s1.isPheno is True
+    assert s1.similarity is None
+
+    # Symptom 2: no fever (negated)
+    s2 = dec_case.symptoms[1]
+    assert s2.term == "no fever"
+    assert len(s2.embedding) == 768
+    assert s2.isNegation is True
+    assert s2.isPheno is False
+
+    # Diagnosis: Insomia
+    assert len(dec_case.diagnosis) == 1
+    d1 = dec_case.diagnosis[0]
+    assert d1.term == "Insomia"
+    assert d1.mondoTerm == "insomnia (disease)"
+    assert d1.mondoCode == 8807
+    assert isinstance(d1.embedding, list)
+    assert len(d1.embedding) == 768
+    assert d1.similarity is None
 

@@ -26,11 +26,13 @@ class MigrationService:
         postgres_source: Optional[PostgresSource] = None,
         mongo_kb: Optional[MongoKnowledgeBase] = None,
         symptom_service: Optional[SymptomService] = None,
+        embedder: Optional[SapBERTEmbedder] = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._pg = postgres_source or PostgresSource(self._settings)
         self._mongo = mongo_kb or MongoKnowledgeBase(self._settings)
         self._symptom_service = symptom_service or SymptomService(settings=self._settings)
+        self._embedder = embedder
 
 
 
@@ -93,7 +95,7 @@ class MigrationService:
         """Pull grouped patient diagnoses from PostgreSQL, resolve embeddings, and patch MongoDB documents."""
         start_time = time.time()
         mondo_service = get_mondo_service(self._settings.mondo_obo_path)
-        embedder = SapBERTEmbedder()
+        embedder = self._embedder or SapBERTEmbedder(self._settings)
 
         term_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -215,6 +217,7 @@ class MigrationService:
                                 Returns True to continue, False to stop.
         """
         start_time = time.time()
+        embedder = self._embedder or SapBERTEmbedder(self._settings)
 
         # Persistent cross-batch HPO cache: term → resolved payload
         # Shared across all batches so identical symptoms are resolved only once.
@@ -283,6 +286,32 @@ class MigrationService:
 
             hpo_resolved = sum(1 for v in hpo_results.values() if v.get("hpoId") is not None)
             hpo_hit_rate = (hpo_resolved / len(unique_terms) * 100) if unique_terms else 0.0
+
+            # ------------------------------------------------------------------
+            # Step 1.3b — Batch SapBERT vector embeddings (cached across batches)
+            # ------------------------------------------------------------------
+            uncached_embed_terms = [
+                t for t in unique_terms
+                if t in hpo_results and "embedding" not in hpo_results[t]
+            ]
+            if uncached_embed_terms:
+                if progress_callback and not progress_callback({
+                    "current_batch": batches_processed,
+                    "total_batches": total_batches,
+                    "total_rows_processed": total_rows_processed,
+                    "documents_updated": total_documents_updated,
+                    "documents_skipped": total_documents_skipped,
+                    "current_step": f"embedding_symptoms_batch_{batches_processed}",
+                }):
+                    logger.info("Chief complaints migration stop requested before embedding (batch %d).", batches_processed)
+                    break
+
+                vectors = embedder.embed_entities(uncached_embed_terms)
+                for i, term in enumerate(uncached_embed_terms):
+                    emb = vectors[i].tolist() if i < len(vectors) else []
+                    hpo_results[term]["embedding"] = emb
+                    if term in hpo_cache:
+                        hpo_cache[term]["embedding"] = emb
 
             # ------------------------------------------------------------------
             # Step 1.4 — Merge HPO results back to per-row symptom payloads
