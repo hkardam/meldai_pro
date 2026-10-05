@@ -1,22 +1,32 @@
-"""FastAPI router — HPO search, MONDO search, SapBERT embeddings."""
+"""FastAPI router — HTTP endpoints for terminology, NLP, and clinical data migrations."""
 
-from typing import Any, Dict, List
+import logging
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 
 from meldai.config import get_settings
-from meldai.db.postgres import PostgresSource
 from meldai.db.mongodb import MongoKnowledgeBase
+from meldai.db.postgres import PostgresSource
+from meldai.nlp.medspacy_nlp import get_medspacy_service
 from meldai.nlp.sapbert import SapBERTEmbedder
+from meldai.services.assertion_service import ClinicalAssertionService
+from meldai.services.chief_complaints_runner import get_chief_complaints_runner
+from meldai.services.migration_service import MigrationService
+from meldai.services.symptom_service import SymptomService
+from meldai.services.terminology_service import TerminologySearchService
 from meldai.terminology.hpo import HPOResult, get_hpo_service
 from meldai.terminology.mondo import MONDOResult, get_mondo_service
+
+
+logger = logging.getLogger(__name__)
 
 api_router = APIRouter(prefix="/api/v1")
 
 
 # ---------------------------------------------------------------------------
-# Embed request / response models
+# Request & Response Schemas
 # ---------------------------------------------------------------------------
 
 class EmbedRequest(BaseModel):
@@ -29,13 +39,156 @@ class EmbedResponse(BaseModel):
     embeddings: List[List[float]]
 
 
+class SegmentSymptomsRequest(BaseModel):
+    note: str
+
+
+class SymptomItem(BaseModel):
+    note: str
+    isPheno: bool
+    embedding: Optional[List[float]] = None
+    hpoCode: Optional[int] = None
+
+    model_config = ConfigDict(exclude_none=True)
+
+
+class SegmentSymptomsResponse(BaseModel):
+    symptoms: List[SymptomItem]
+
+
+class BatchSymptomMatchRequest(BaseModel):
+    symptoms: List[str] = Field(..., description="Array of raw clinical symptom text strings", min_length=1)
+    top_k: int = Field(3, ge=1, le=10, description="Top K ontology matches to return per symptom")
+
+
+class HPOMatchItem(BaseModel):
+    hpo_id: str
+    code: Optional[int] = None
+    label: str
+    match_type: str
+    score: Optional[float] = None
+
+
+class MONDOMatchItem(BaseModel):
+    mondo_id: str
+    code: Optional[int] = None
+    label: str
+    match_type: str
+    score: Optional[float] = None
+
+
+class SymptomMatchResult(BaseModel):
+    symptom: str
+    search_target: str
+    assertion_status: str
+    is_negated: bool
+    is_phenotype: bool
+    hpo_matches: List[HPOMatchItem]
+    mondo_matches: List[MONDOMatchItem]
+
+
+class BatchSymptomMatchResponse(BaseModel):
+    total_symptoms: int
+    matches: List[SymptomMatchResult]
+
+
+class PatientVisitMigrationResponse(BaseModel):
+
+    status: str
+    batch_size: int
+    total_records_processed: int
+    batches_processed: int
+    upserted_count: int
+    modified_count: int
+    matched_count: int
+
+
+class PatientDiagnosisMigrationResponse(BaseModel):
+    status: str
+    batch_size: int
+    total_encounters_processed: int
+    batches_processed: int
+    modified_count: int
+    matched_count: int
+    unique_terms_indexed: int
+    execution_time_seconds: float
+
+
+class ChiefComplaintsRunStatusResponse(BaseModel):
+    status: str
+    batch_size: int
+    current_batch: int
+    total_batches: int
+    total_rows_processed: int
+    documents_updated: int
+    documents_skipped: int
+    current_step: str
+    start_time: Optional[float] = None
+    elapsed_seconds: float
+    error: Optional[str] = None
+
+
+class ChiefComplaintsActionResponse(BaseModel):
+    status: str
+    message: str
+    batch_size: Optional[int] = None
+
+
+
+
 # ---------------------------------------------------------------------------
-# Health
+# Service Factories (wired to router dependencies for testing/mocking)
+# ---------------------------------------------------------------------------
+
+def _get_terminology_service() -> TerminologySearchService:
+    settings = get_settings()
+    nlp = get_medspacy_service()
+    hpo = get_hpo_service(settings.hpo_obo_path)
+    mondo = get_mondo_service(settings.mondo_obo_path)
+    assertion = ClinicalAssertionService(nlp_service=nlp)
+    return TerminologySearchService(
+        settings=settings,
+        assertion_service=assertion,
+        hpo_service=hpo,
+        mondo_service=mondo,
+    )
+
+
+def _get_symptom_service() -> SymptomService:
+    settings = get_settings()
+    nlp = get_medspacy_service()
+    hpo = get_hpo_service(settings.hpo_obo_path)
+    mondo = get_mondo_service(settings.mondo_obo_path)
+    assertion = ClinicalAssertionService(nlp_service=nlp)
+    return SymptomService(
+        settings=settings,
+        nlp_service=nlp,
+        assertion_service=assertion,
+        hpo_service=hpo,
+        mondo_service=mondo,
+    )
+
+
+def _get_migration_service() -> MigrationService:
+    settings = get_settings()
+    pg = PostgresSource(settings)
+    mongo = MongoKnowledgeBase(settings)
+    symptom_svc = _get_symptom_service()
+    return MigrationService(
+        settings=settings,
+        postgres_source=pg,
+        mongo_kb=mongo,
+        symptom_service=symptom_svc,
+    )
+
+
+# ---------------------------------------------------------------------------
+# System & Health
 # ---------------------------------------------------------------------------
 
 @api_router.get("/health")
 def health_check() -> Dict[str, Any]:
-    """Check connectivity to PostgreSQL and MongoDB."""
+    """Verify connectivity to PostgreSQL, MongoDB, and ontology paths."""
     settings = get_settings()
     pg = PostgresSource(settings)
     mongo = MongoKnowledgeBase(settings)
@@ -55,245 +208,203 @@ def health_check() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# HPO search
+# Terminology (HPO & MONDO)
 # ---------------------------------------------------------------------------
 
 @api_router.get("/hpo/search", response_model=List[HPOResult])
 def search_hpo(
     term: str = Query(..., min_length=2, description="Phenotype / symptom term to look up"),
     limit: int = Query(5, ge=1, le=50, description="Maximum number of results"),
+    filter_negated: bool = Query(False, description="If true, exclude concepts detected as negated"),
 ) -> List[HPOResult]:
-    """Search the Human Phenotype Ontology (HPO) for a given term.
-
-    Returns matching HPO concepts sorted by match quality
-    (exact label → synonym → substring).
-    """
-    settings = get_settings()
-    service = get_hpo_service(settings.hpo_obo_path)
+    """Search Human Phenotype Ontology (HPO) with clinical assertion metadata."""
     try:
-        results = service.search(term, limit=limit)
+        service = _get_terminology_service()
+        results = service.search_hpo(term=term, limit=limit, filter_negated=filter_negated)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.error("HPO search failed for '%s': %s", term, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"HPO search error: {str(exc)}")
 
-    if not results:
+    if not results and not (filter_negated and term):
         raise HTTPException(status_code=404, detail=f"No HPO concept found for '{term}'")
+
     return results
 
-
-# ---------------------------------------------------------------------------
-# MONDO search
-# ---------------------------------------------------------------------------
 
 @api_router.get("/mondo/search", response_model=List[MONDOResult])
 def search_mondo(
     term: str = Query(..., min_length=2, description="Disease / disorder term to look up"),
     limit: int = Query(5, ge=1, le=50, description="Maximum number of results"),
+    filter_negated: bool = Query(False, description="If true, exclude concepts detected as negated"),
 ) -> List[MONDOResult]:
-    """Search the MONDO Disease Ontology for a given term.
-
-    Returns matching MONDO concepts sorted by match quality
-    (exact label → synonym → substring).
-    """
-    settings = get_settings()
-    service = get_mondo_service(settings.mondo_obo_path)
+    """Search MONDO Disease Ontology with clinical assertion metadata."""
     try:
-        results = service.search(term, limit=limit)
+        service = _get_terminology_service()
+        results = service.search_mondo(term=term, limit=limit, filter_negated=filter_negated)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.error("MONDO search failed for '%s': %s", term, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"MONDO search error: {str(exc)}")
 
-    if not results:
+    if not results and not (filter_negated and term):
         raise HTTPException(status_code=404, detail=f"No MONDO concept found for '{term}'")
+
     return results
 
 
 # ---------------------------------------------------------------------------
-# SapBERT embeddings
+# SapBERT Embeddings
 # ---------------------------------------------------------------------------
 
 @api_router.post("/embed", response_model=EmbedResponse)
 def generate_embeddings(payload: EmbedRequest) -> EmbedResponse:
-    """Generate dense SapBERT clinical embeddings for given medical phrases."""
-    embedder = SapBERTEmbedder()
-    vectors = embedder.embed_entities(payload.terms)
-    return EmbedResponse(
-        terms=payload.terms,
-        dimension=vectors.shape[1] if len(vectors) > 0 else 768,
-        embeddings=vectors.tolist(),
-    )
+    """Generate 768-d SapBERT dense clinical embeddings for provided terms."""
+    try:
+        embedder = SapBERTEmbedder()
+        vectors = embedder.embed_entities(payload.terms)
+        return EmbedResponse(
+            terms=payload.terms,
+            dimension=vectors.shape[1] if len(vectors) > 0 else 768,
+            embeddings=vectors.tolist(),
+        )
+    except Exception as exc:
+        logger.error("Embedding generation failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Embedding error: {str(exc)}")
 
 
 # ---------------------------------------------------------------------------
-# Migration / Data Ingestion API
+# Symptom Segmentation
 # ---------------------------------------------------------------------------
 
-class PatientVisitMigrationResponse(BaseModel):
-    status: str
-    batch_size: int
-    total_records_processed: int
-    batches_processed: int
-    upserted_count: int
-    modified_count: int
-    matched_count: int
+@api_router.post(
+    "/utils/segment-symptoms",
+    response_model=SegmentSymptomsResponse,
+    response_model_exclude_none=True,
+)
+def segment_symptoms(payload: SegmentSymptomsRequest) -> SegmentSymptomsResponse:
+    """Segment an unstructured clinical note into phenotype and non-phenotype symptoms."""
+    try:
+        service = _get_symptom_service()
+        items = service.segment_note_symptoms(payload.note)
+        return SegmentSymptomsResponse(symptoms=[SymptomItem(**item) for item in items])
+    except RuntimeError as exc:
+        logger.error("Clinical NLP service unavailable: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Clinical NLP service unavailable: {str(exc)}")
+    except Exception as exc:
+        logger.error("Symptom segmentation failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Symptom segmentation error: {str(exc)}")
 
+
+# ---------------------------------------------------------------------------
+# Patient Visit Migration (PostgreSQL -> MongoDB)
+# ---------------------------------------------------------------------------
 
 @api_router.post("/cases/migrate-patient-visits", response_model=PatientVisitMigrationResponse)
 def migrate_patient_visits(
     batch_size: int = Query(1000, ge=1, le=10000, description="Batch size for extracting and pushing records"),
 ) -> PatientVisitMigrationResponse:
-    """
-    Pull patient visit data from PostgreSQL (temp_migrations.patient_visit_data)
-    in batches of `batch_size` (default 1000) and upsert/patch into MongoDB 'cases' collection
-    using a unique compound index on (caseNo, visitDate).
-    """
-    settings = get_settings()
-    pg = PostgresSource(settings)
-    mongo = MongoKnowledgeBase(settings)
-
-    # Initialize / verify unique compound index on (caseNo, visitDate)
-    mongo.setup_patient_visits_index()
-
-    total_processed = 0
-    batches_count = 0
-    total_upserted = 0
-    total_modified = 0
-    total_matched = 0
-
+    """Stream patient visits from PostgreSQL and upsert/patch into MongoDB 'cases' collection."""
     try:
-        for batch in pg.stream_patient_visit_data(batch_size=batch_size):
-            if not batch:
-                continue
-            res = mongo.upsert_patient_visits_batch(batch)
-            total_processed += len(batch)
-            batches_count += 1
-            total_upserted += res.get("upserted_count", 0)
-            total_modified += res.get("modified_count", 0)
-            total_matched += res.get("matched_count", 0)
-
-        return PatientVisitMigrationResponse(
-            status="success",
-            batch_size=batch_size,
-            total_records_processed=total_processed,
-            batches_processed=batches_count,
-            upserted_count=total_upserted,
-            modified_count=total_modified,
-            matched_count=total_matched,
-        )
+        migration_svc = _get_migration_service()
+        result = migration_svc.migrate_patient_visits(batch_size=batch_size)
+        return PatientVisitMigrationResponse(**result)
     except Exception as exc:
+        logger.error("Patient visit migration failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Patient visit migration failed: {str(exc)}")
 
 
 # ---------------------------------------------------------------------------
-# Patient Diagnosis Migration API
+# Patient Diagnosis Migration (PostgreSQL -> MongoDB)
 # ---------------------------------------------------------------------------
-
-class PatientDiagnosisMigrationResponse(BaseModel):
-    status: str
-    batch_size: int
-    total_encounters_processed: int
-    batches_processed: int
-    modified_count: int
-    matched_count: int
-    unique_terms_indexed: int
-    execution_time_seconds: float
-
 
 @api_router.post("/cases/migrate-patient-diagnoses", response_model=PatientDiagnosisMigrationResponse)
 def migrate_patient_diagnoses(
     batch_size: int = Query(1000, ge=1, le=10000, description="Batch size for extracting and pushing records"),
 ) -> PatientDiagnosisMigrationResponse:
+    """Stream grouped patient diagnoses from PostgreSQL, resolve embeddings, and patch MongoDB documents.
+
+    Non-destructive patching:
+    Patches only the 'diagnosis' field using MongoDB $set operator, preserving existing
+    fields (like 'symptoms' and 'visitReason').
     """
-    Pull patient diagnosis data grouped by (caseNo, visitDate) from PostgreSQL
-    (temp_migrations.patient_diagnosis_data) using ARRAY_AGG(DISTINCT "Diagnosis Name").
-    Resolves MONDO codes and SapBERT clinical embeddings (cached in memory)
-    and replaces the 'diagnosis' array on matching MongoDB 'cases' documents.
-    """
-    import re
-    import time
-
-    start_time = time.time()
-    settings = get_settings()
-    pg = PostgresSource(settings)
-    mongo = MongoKnowledgeBase(settings)
-    mondo_service = get_mondo_service(settings.mondo_obo_path)
-    embedder = SapBERTEmbedder()
-
-    term_cache: Dict[str, Dict[str, Any]] = {}
-
-    def _ensure_terms_cached(terms: List[str]) -> None:
-        uncached = list(dict.fromkeys([t.strip() for t in terms if t and t.strip() and t.strip() not in term_cache]))
-        if not uncached:
-            return
-
-        # 1. MONDO lookups
-        mondo_codes: Dict[str, Optional[int]] = {}
-        for t in uncached:
-            code = None
-            try:
-                res = mondo_service.search(t, limit=1)
-                if res:
-                    m = re.search(r"\d+", res[0].mondo_id)
-                    if m:
-                        code = int(m.group())
-            except Exception:
-                code = None
-            mondo_codes[t] = code
-
-        # 2. Batch SapBERT embedding
-        vectors = embedder.embed_entities(uncached)
-        for i, t in enumerate(uncached):
-            emb = vectors[i].tolist() if i < len(vectors) else []
-            term_cache[t] = {
-                "term": t,
-                "mondoCode": mondo_codes[t],
-                "embedding": emb,
-            }
-
-    total_encounters = 0
-    batches_count = 0
-    total_modified = 0
-    total_matched = 0
-
     try:
-        for batch in pg.stream_grouped_patient_diagnoses(batch_size=batch_size):
-            if not batch:
-                continue
+        migration_svc = _get_migration_service()
+        result = migration_svc.migrate_patient_diagnoses(batch_size=batch_size)
+        return PatientDiagnosisMigrationResponse(**result)
+    except Exception as exc:
+        logger.error("Patient diagnosis migration failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Patient diagnosis migration failed: {str(exc)}")
 
-            # Extract terms and batch cache
-            batch_terms = [t for enc in batch for t in enc.get("diagnosisNames", []) if t and t.strip()]
-            _ensure_terms_cached(batch_terms)
 
-            # Build mongo update payload
-            mongo_batch = []
-            for enc in batch:
-                case_no = enc["caseNo"]
-                visit_date = enc["visitDate"]
-                diag_names = enc.get("diagnosisNames", [])
-                diag_payloads = [term_cache[name.strip()] for name in diag_names if name and name.strip() in term_cache]
-                mongo_batch.append({
-                    "caseNo": case_no,
-                    "visitDate": visit_date,
-                    "diagnosis": diag_payloads,
-                })
+# ---------------------------------------------------------------------------
+# Patient Chief Complaints Migration (PostgreSQL -> MongoDB - Background Runner)
+# ---------------------------------------------------------------------------
 
-            res = mongo.replace_case_diagnoses_batch(mongo_batch)
-            total_encounters += len(batch)
-            batches_count += 1
-            total_modified += res.get("modified_count", 0)
-            total_matched += res.get("matched_count", 0)
 
-        exec_time = round(time.time() - start_time, 3)
 
-        return PatientDiagnosisMigrationResponse(
-            status="success",
-            batch_size=batch_size,
-            total_encounters_processed=total_encounters,
-            batches_processed=batches_count,
-            modified_count=total_modified,
-            matched_count=total_matched,
-            unique_terms_indexed=len(term_cache),
-            execution_time_seconds=exec_time,
+@api_router.post(
+    "/cases/migrate-patient-chief-complaints/start",
+    response_model=ChiefComplaintsActionResponse,
+)
+def start_migrate_patient_chief_complaints(
+    batch_size: int = Query(100, ge=1, le=10000, description="Batch size for extracting and pushing records"),
+) -> ChiefComplaintsActionResponse:
+    """Start asynchronous background migration of patient chief complaints."""
+    runner = get_chief_complaints_runner()
+    res = runner.start(batch_size=batch_size)
+    if res.get("status") == "conflict":
+        raise HTTPException(status_code=409, detail=res["message"])
+    return ChiefComplaintsActionResponse(**res)
+
+
+@api_router.post(
+    "/cases/migrate-patient-chief-complaints/stop",
+    response_model=ChiefComplaintsActionResponse,
+)
+def stop_migrate_patient_chief_complaints() -> ChiefComplaintsActionResponse:
+    """Request graceful stop of the active chief complaints migration runner."""
+    runner = get_chief_complaints_runner()
+    res = runner.stop()
+    return ChiefComplaintsActionResponse(**res)
+
+
+@api_router.get(
+    "/cases/migrate-patient-chief-complaints/status",
+    response_model=ChiefComplaintsRunStatusResponse,
+)
+def get_migrate_patient_chief_complaints_status() -> ChiefComplaintsRunStatusResponse:
+    """Get the current run status and metrics of the chief complaints migration."""
+    runner = get_chief_complaints_runner()
+    status = runner.get_status()
+    return ChiefComplaintsRunStatusResponse(**status)
+
+
+# ---------------------------------------------------------------------------
+# Batch Symptom Ontology Matcher (medspaCy Pipe + HPO + MONDO)
+# ---------------------------------------------------------------------------
+
+@api_router.post(
+    "/symptoms/match-batch",
+    response_model=BatchSymptomMatchResponse,
+    summary="Batch match clinical symptoms to top-K HPO and MONDO concepts",
+)
+def match_symptoms_batch(
+    payload: BatchSymptomMatchRequest,
+) -> BatchSymptomMatchResponse:
+    """Batch process a list of raw symptom strings through medspaCy assertion NLP pipeline and return top 3 HPO & MONDO concept matches."""
+    try:
+        symptom_svc = _get_symptom_service()
+        results = symptom_svc.match_symptoms_batch(payload.symptoms, top_k=payload.top_k)
+        return BatchSymptomMatchResponse(
+            total_symptoms=len(results),
+            matches=[SymptomMatchResult(**item) for item in results],
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Patient diagnosis migration failed: {str(exc)}")
+        logger.error("Batch symptom matching failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Batch symptom matching failed: {str(exc)}")
+
 
 

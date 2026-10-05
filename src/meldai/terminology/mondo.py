@@ -53,6 +53,18 @@ class MONDOResult(BaseModel):
         default=None,
         description="Relevance / similarity score (0.0 to 1.0)",
     )
+    is_negated: bool = Field(
+        default=False,
+        description="Whether a clinical negation modifier was detected for this query",
+    )
+    is_phenotype: bool = Field(
+        default=True,
+        description="Whether the concept represents an affirmed finding",
+    )
+    assertion_status: str = Field(
+        default="affirmed",
+        description="Assertion status: 'affirmed' | 'negated' | 'uncertain' | 'historical' | 'family'",
+    )
 
 
 # ---------------------------------------------------------------------------

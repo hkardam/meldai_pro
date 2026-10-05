@@ -1,7 +1,7 @@
 """MongoDB Knowledge Base & Data Sink for Medical Cases and Embeddings."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 from pydantic import BaseModel, Field
 from pymongo import MongoClient, ASCENDING, UpdateOne
@@ -223,9 +223,69 @@ class MongoKnowledgeBase:
             "matched_count": result.matched_count,
         }
 
+    def find_case_by_encounter(self, case_no: Any, visit_date: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a specific case document by compound key (caseNo, visitDate)."""
+        return self.cases.find_one({"caseNo": case_no, "visitDate": visit_date})
+
+    def update_case_symptoms(self, case_id: Any, symptoms: List[Dict[str, Any]]) -> bool:
+        """Non-destructively patch symptoms array on a specific case document by _id.
+
+        Uses the MongoDB $set operator so ONLY the 'symptoms' field is updated.
+        All other existing fields (such as 'diagnosis', 'visitReason', 'caseNo',
+        and 'visitDate') are strictly preserved and untouched.
+        """
+        res = self.cases.update_one(
+            {"_id": case_id},
+            {"$set": {"symptoms": symptoms}},
+        )
+        return res.modified_count > 0 or res.matched_count > 0
+
+    def find_cases_by_encounters_batch(
+        self, encounters: List[Tuple[Any, Any]]
+    ) -> Dict[Tuple[Any, str], Dict[str, Any]]:
+        """Fetch multiple case documents in a single round-trip using an $or compound query.
+
+        Returns a dictionary mapping (caseNo, str(visitDate)) -> doc.
+        """
+        if not encounters:
+            return {}
+        or_clauses = [{"caseNo": c, "visitDate": v} for c, v in encounters if c is not None and v is not None]
+        if not or_clauses:
+            return {}
+        cursor = self.cases.find(
+            {"$or": or_clauses},
+            {"_id": 1, "caseNo": 1, "visitDate": 1, "patient_visit_id": 1}
+        )
+        result: Dict[Tuple[Any, str], Dict[str, Any]] = {}
+        for doc in cursor:
+            result[(doc.get("caseNo"), str(doc.get("visitDate")))] = doc
+        return result
+
+    def update_cases_symptoms_bulk(
+        self, updates: List[Tuple[Any, List[Dict[str, Any]]]]
+    ) -> Dict[str, int]:
+        """Bulk non-destructively patch symptoms array on multiple case documents.
+
+        Uses the MongoDB $set operator so ONLY the 'symptoms' field is updated.
+        Existing fields (diagnosis, visitReason, etc.) are strictly preserved.
+        """
+        if not updates:
+            return {"modified_count": 0, "matched_count": 0}
+
+        operations = [
+            UpdateOne({"_id": doc_id}, {"$set": {"symptoms": symptoms}})
+            for doc_id, symptoms in updates
+        ]
+        result = self.cases.bulk_write(operations, ordered=False)
+        return {
+            "modified_count": result.modified_count,
+            "matched_count": result.matched_count,
+        }
+
     def close(self) -> None:
         """Close MongoDB connection pool."""
         if self._client:
             self._client.close()
             self._client = None
+
 

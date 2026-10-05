@@ -1,20 +1,36 @@
 """Utility methods for MeldAI medical text processing and symptom parsing."""
 
-import re
+import unicodedata
+
+KEEP = set("%+/?-().,:;")  # clinically meaningful: 60%, ++, ?GTCS, D/d, etc.
+
+
+def sanitize(text: str) -> str:
+    """Sanitize text by normalizing unicode and stripping leading symbol/bullet glyphs and whitespace."""
+    text = unicodedata.normalize("NFKC", text)
+    lines = []
+    for line in text.splitlines():
+        i = 0
+        # strip leading symbol/bullet glyphs and whitespace, but keep meaningful ones
+        while i < len(line) and (
+            line[i].isspace()
+            or (line[i] not in KEEP and unicodedata.category(line[i]).startswith(("S", "P")))
+        ):
+            i += 1
+        lines.append(line[i:].rstrip())
+    return "\n".join(l for l in lines if l)
 
 
 def segment(note: str) -> list[str]:
     """Split a string of symptoms or clinical notes into a list of segmented strings.
 
-    Handles bullet points (●), sentence boundaries, and commas/semicolons that are not
-    enclosed within parentheses.
+    Splits only based on newline characters and bullet points (●), and sanitizes each segment.
+    Phenotype classification is handled downstream by MedspaCyService.
     """
     note = note.replace("●", "\n")
-    out = []
+    results = []
     for line in note.splitlines():
-        out += re.split(
-            r"(?<=\.)\s+"  # sentence end
-            r"|[,;](?![^()]*\))",  # comma/semicolon NOT inside parentheses
-            line,
-        )
-    return [s.strip(" .") for s in out if s.strip(" .")]
+        sanitized_item = sanitize(line).strip(" .")
+        if sanitized_item:
+            results.append(sanitized_item)
+    return results

@@ -1,35 +1,34 @@
-from meldai.utils import segment
+from meldai.utils import sanitize, segment
 
 
-def test_segment_bullets_and_lines():
-    note = "● Fever\n● Cough\n● Headache"
-    result = segment(note)
-    assert result == ["Fever", "Cough", "Headache"]
+def test_sanitize_unicode_and_leading_bullets():
+    raw = "★ • 60% cough, ++fever, ?GTCS"
+    sanitized = sanitize(raw)
+    assert sanitized == "60% cough, ++fever, ?GTCS"
 
 
-def test_segment_commas_and_semicolons():
-    note = "Fever, cough; shortness of breath"
-    result = segment(note)
-    assert result == ["Fever", "cough", "shortness of breath"]
+def test_sanitize_keeps_clinical_symbols():
+    text = "+fever\n?GTCS\n-cough"
+    assert sanitize(text) == "+fever\n?GTCS\n-cough"
 
 
-def test_segment_parentheses_ignored():
-    note = "Fever (mild, non-persistent), cough (dry; nocturnal), fatigue"
+def test_segment_splits_only_newlines_and_bullets():
+    note = "● Fever, chills; sweating\n● Cough with sputum (mild, dry)\n● Severe headache. Dizziness"
     result = segment(note)
     assert result == [
-        "Fever (mild, non-persistent)",
-        "cough (dry; nocturnal)",
-        "fatigue",
+        "Fever, chills; sweating",
+        "Cough with sputum (mild, dry)",
+        "Severe headache. Dizziness",
     ]
 
 
-def test_segment_sentence_ends():
-    note = "Patient has severe headache. Also reports nausea and dizziness."
+def test_segment_with_sanitization():
+    note = "★ • High grade fever (+39C)\n■ persistent cough (dry)\n● ?GTCS"
     result = segment(note)
     assert result == [
-        "Patient has severe headache",
-        "Also reports nausea",
-        "dizziness",
+        "High grade fever (+39C)",
+        "persistent cough (dry)",
+        "?GTCS",
     ]
 
 

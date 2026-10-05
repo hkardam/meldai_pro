@@ -40,7 +40,7 @@
                 "health"
               ]
             },
-            "description": "Check connectivity to PostgreSQL, MongoDB, and Snowstorm."
+            "description": "Check connectivity to PostgreSQL, MongoDB, and ontology paths."
           },
           "response": [
             {
@@ -68,7 +68,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"status\": \"online\",\n  \"environment\": \"development\",\n  \"services\": {\n    \"postgres\": false,\n    \"mongodb\": true,\n    \"snowstorm\": true\n  }\n}"
+              "body": "{\n  \"status\": \"online\",\n  \"environment\": \"development\",\n  \"services\": {\n    \"postgres\": true,\n    \"mongodb\": true\n  },\n  \"ontologies\": {\n    \"hpo\": \"data/hpo/hp.obo\",\n    \"mondo\": \"data/mondo/mondo.obo\"\n  }\n}"
             }
           ]
         }
@@ -144,14 +144,154 @@
               "body": "{\n  \"terms\": [\n    \"acute myocardial infarction\",\n    \"chest pain\"\n  ],\n  \"dimension\": 768,\n  \"embeddings\": [\n    [\n      -0.0312,\n      0.0541,\n      0.0124,\n      -0.0194\n    ],\n    [\n      0.017,\n      0.0357,\n      -0.0203,\n      -0.0452\n    ]\n  ]\n}"
             }
           ]
+        },
+        {
+          "name": "Segment Symptoms",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"\\u25cf anxiety while driving\\n\\u25cf 60% better mood\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/utils/segment-symptoms",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "utils",
+                "segment-symptoms"
+              ]
+            },
+            "description": "Split clinical note into segments, classify phenotypes, and attach HPO code + SapBERT embedding for phenotypes."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/utils/segment-symptoms",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "utils",
+                    "segment-symptoms"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"symptoms\": [\n    {\n      \"note\": \"anxiety while driving\",\n      \"isPheno\": true,\n      \"embedding\": [\n        -0.0312,\n        0.0541,\n        0.0124\n      ],\n      \"hpoCode\": 745\n    },\n    {\n      \"note\": \"60% better mood\",\n      \"isPheno\": false\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Batch Match Symptoms (medspaCy Pipe + HPO + MONDO Top 3)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"symptoms\": [\n    \"severe headache\",\n    \"denies fever\",\n    \"chronic insomnia\"\n  ],\n  \"top_k\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/symptoms/match-batch",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "symptoms",
+                "match-batch"
+              ]
+            },
+            "description": "Batch process an array of symptom strings through medspaCy assertion NLP pipe and return top 3 HPO & MONDO concept matches."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/symptoms/match-batch",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "symptoms",
+                    "match-batch"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"total_symptoms\": 3,\n  \"matches\": [\n    {\n      \"symptom\": \"severe headache\",\n      \"search_target\": \"headache\",\n      \"assertion_status\": \"affirmed\",\n      \"is_negated\": false,\n      \"is_phenotype\": true,\n      \"hpo_matches\": [\n        {\n          \"hpo_id\": \"HP:0002315\",\n          \"code\": 2315,\n          \"label\": \"Headache\",\n          \"match_type\": \"exact_label\",\n          \"score\": 1.0\n        }\n      ],\n      \"mondo_matches\": [\n        {\n          \"mondo_id\": \"MONDO:0005555\",\n          \"code\": 5555,\n          \"label\": \"headache disorder\",\n          \"match_type\": \"exact_label\",\n          \"score\": 1.0\n        }\n      ]\n    }\n  ]\n}"
+            }
+          ]
         }
       ]
     },
     {
-      "name": "Terminology (SNOMED CT)",
+      "name": "Terminology (HPO & MONDO)",
       "item": [
         {
-          "name": "Search SNOMED CT Concept",
+          "name": "Search HPO Concept (medspaCy Assertion-Aware)",
           "request": {
             "method": "GET",
             "header": [
@@ -162,45 +302,50 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/v1/snomed/search?term=chest%20pain&limit=5",
+              "raw": "{{base_url}}/api/v1/hpo/search?term=playing%20video%20games&limit=5&filter_negated=false",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
                 "v1",
-                "snomed",
+                "hpo",
                 "search"
               ],
               "query": [
                 {
                   "key": "term",
-                  "value": "chest pain",
-                  "description": "Clinical diagnosis or symptom term (minimum 2 characters)"
+                  "value": "playing video games",
+                  "description": "Phenotype / symptom term to look up (evaluated with medspaCy ConText for negation)"
                 },
                 {
                   "key": "limit",
                   "value": "5",
                   "description": "Maximum concept matches to return"
+                },
+                {
+                  "key": "filter_negated",
+                  "value": "false",
+                  "description": "If true, exclude concepts detected as negated (returns empty array [] if negated)"
                 }
               ]
             },
-            "description": "Search SNOMED CT terminology via Snowstorm."
+            "description": "Search Human Phenotype Ontology (HPO) concepts with medspaCy clinical assertion (negation detection)."
           },
           "response": [
             {
-              "name": "200 OK",
+              "name": "200 OK (Affirmed Phenotype)",
               "originalRequest": {
                 "method": "GET",
                 "url": {
-                  "raw": "{{base_url}}/api/v1/snomed/search?term=chest%20pain&limit=5",
+                  "raw": "{{base_url}}/api/v1/hpo/search?term=playing%20video%20games&limit=5&filter_negated=true",
                   "host": [
                     "{{base_url}}"
                   ],
                   "path": [
                     "api",
                     "v1",
-                    "snomed",
+                    "hpo",
                     "search"
                   ]
                 }
@@ -214,7 +359,75 @@
                   "value": "application/json"
                 }
               ],
-              "body": "[\n  {\n    \"concept_id\": \"29857009\",\n    \"fsn\": \"Chest pain (finding)\",\n    \"preferred_term\": \"Chest pain\",\n    \"semantic_tag\": \"finding\",\n    \"score\": 1.0,\n    \"definition_status\": \"PRIMITIVE\"\n  }\n]"
+              "body": "[\n  {\n    \"hpo_id\": \"HP:5200336\",\n    \"label\": \"Addictive video game use\",\n    \"synonyms\": [\n      \"Excessive video game playing\",\n      \"Video game addiction\"\n    ],\n    \"definition\": \"The inability to regulate persistent gaming behavior is characterized by a heightened prioritization of gaming activities over regular daily tasks and responsibilities.\",\n    \"match_type\": \"token_label\",\n    \"score\": 0.8325,\n    \"is_negated\": false,\n    \"is_phenotype\": true,\n    \"assertion_status\": \"affirmed\"\n  }\n]"
+            }
+          ]
+        },
+        {
+          "name": "Search MONDO Disease Concept",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/mondo/search?term=diabetes%20mellitus&limit=5",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "mondo",
+                "search"
+              ],
+              "query": [
+                {
+                  "key": "term",
+                  "value": "diabetes mellitus",
+                  "description": "Disease / disorder term to look up"
+                },
+                {
+                  "key": "limit",
+                  "value": "5",
+                  "description": "Maximum concept matches to return"
+                }
+              ]
+            },
+            "description": "Search the MONDO Disease Ontology for a given disease / disorder term."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/mondo/search?term=diabetes%20mellitus&limit=5",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "mondo",
+                    "search"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "[\n  {\n    \"mondo_id\": \"MONDO:0005015\",\n    \"label\": \"diabetes mellitus\",\n    \"synonyms\": [\n      \"diabetes\"\n    ],\n    \"definition\": \"A metabolic disease characterized by chronic hyperglycemia resulting from defects in insulin secretion, insulin action, or both.\",\n    \"match_type\": \"exact_label\",\n    \"score\": 1.0\n  }\n]"
             }
           ]
         }
@@ -346,6 +559,187 @@
                 }
               ],
               "body": "{\n  \"status\": \"success\",\n  \"batch_size\": 1000,\n  \"total_encounters_processed\": 523,\n  \"batches_processed\": 1,\n  \"modified_count\": 523,\n  \"matched_count\": 523,\n  \"unique_terms_indexed\": 57,\n  \"execution_time_seconds\": 1.452\n}"
+            }
+          ]
+        },
+        {
+          "name": "Start Migrate Patient Chief Complaints (Background)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/start?batch_size=100",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cases",
+                "migrate-patient-chief-complaints",
+                "start"
+              ],
+              "query": [
+                {
+                  "key": "batch_size",
+                  "value": "100",
+                  "description": "Batch size for extracting and pushing records in the background"
+                }
+              ]
+            },
+            "description": "Trigger the asynchronous background migration worker for patient chief complaints."
+          },
+          "response": [
+            {
+              "name": "200 Started",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/start?batch_size=100",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "cases",
+                    "migrate-patient-chief-complaints",
+                    "start"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"started\",\n  \"message\": \"Chief complaints migration started in background.\",\n  \"batch_size\": 100\n}"
+            }
+          ]
+        },
+        {
+          "name": "Stop Migrate Patient Chief Complaints",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/stop",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cases",
+                "migrate-patient-chief-complaints",
+                "stop"
+              ]
+            },
+            "description": "Send graceful cancellation signal to halt chief complaints background migration."
+          },
+          "response": [
+            {
+              "name": "200 Stop Requested",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/stop",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "cases",
+                    "migrate-patient-chief-complaints",
+                    "stop"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"stopping\",\n  \"message\": \"Stop signal sent. Runner will cleanly halt after finishing current batch.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Migrate Patient Chief Complaints Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cases",
+                "migrate-patient-chief-complaints",
+                "status"
+              ]
+            },
+            "description": "Poll the active run status and progress metrics of the chief complaints migration."
+          },
+          "response": [
+            {
+              "name": "200 Status",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/status",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "cases",
+                    "migrate-patient-chief-complaints",
+                    "status"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"running\",\n  \"batch_size\": 100,\n  \"current_batch\": 3,\n  \"total_batches\": 10,\n  \"total_rows_processed\": 300,\n  \"documents_updated\": 290,\n  \"documents_skipped\": 10,\n  \"current_step\": \"batch_3_completed\",\n  \"start_time\": 1728120000.0,\n  \"elapsed_seconds\": 3.8,\n  \"error\": null\n}"
             }
           ]
         }
