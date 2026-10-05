@@ -408,3 +408,83 @@ class MigrationService:
             "unique_terms_cached": len(hpo_cache),
             "execution_time_seconds": exec_time,
         }
+
+    def migrate_patient_prescriptions(self, batch_size: int = 1000) -> Dict[str, Any]:
+        """
+        Pull patient prescription/medication data from PostgreSQL in batches,
+        match case documents in MongoDB using caseNo + visitDate, and patch the
+        'medications' field with the raw medicine name strings directly.
+        """
+        start_time = time.time()
+        total_encounters = 0
+        batches_count = 0
+        total_modified = 0
+        total_matched = 0
+
+        total_records = 0
+        try:
+            count_val = self._pg.get_patient_prescriptions_count()
+            if isinstance(count_val, int):
+                total_records = count_val
+        except Exception as exc:
+            logger.warning("Could not determine total patient prescriptions count: %s", exc)
+
+        batches = self._pg.stream_patient_prescriptions(batch_size=batch_size)
+        if total_records > 0:
+            total_batches = math.ceil(total_records / batch_size)
+        elif isinstance(batches, (list, tuple)):
+            total_batches = len(batches)
+        else:
+            total_batches = 0
+
+        for batch in batches:
+            if not batch:
+                continue
+
+            batches_count += 1
+            total_encounters += len(batch)
+
+            encounters = [(enc["caseNo"], enc["visitDate"]) for enc in batch]
+            docs_map = self._mongo.find_cases_by_encounters_batch(encounters)
+
+            updates: List[Tuple[Any, List[str]]] = []
+            for enc in batch:
+                key = (enc["caseNo"], str(enc["visitDate"]))
+                doc = docs_map.get(key)
+                if doc:
+                    updates.append((doc["_id"], enc.get("medications", [])))
+
+            if updates:
+                res = self._mongo.update_cases_medications_bulk(updates)
+                total_modified += res.get("modified_count", 0)
+                total_matched += res.get("matched_count", 0)
+
+            logger.info(
+                "Completed patient prescriptions migration batch %d/%d (batch_size=%d, matched=%d, modified=%d)",
+                batches_count,
+                total_batches or batches_count,
+                len(batch),
+                len(updates),
+                total_modified,
+            )
+
+        exec_time = round(time.time() - start_time, 3)
+        logger.info(
+            "Patient prescriptions migration finished: total_encounters=%d batches=%d modified=%d matched=%d elapsed=%.3fs",
+            total_encounters,
+            batches_count,
+            total_modified,
+            total_matched,
+            exec_time,
+        )
+
+        return {
+            "status": "success",
+            "batch_size": batch_size,
+            "total_encounters_processed": total_encounters,
+            "batches_processed": batches_count,
+            "modified_count": total_modified,
+            "matched_count": total_matched,
+            "execution_time_seconds": exec_time,
+        }
+

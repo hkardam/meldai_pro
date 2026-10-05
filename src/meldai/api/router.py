@@ -4,8 +4,25 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
-
+from meldai.api.req_dtos import (
+    BatchSymptomMatchRequest,
+    EmbedRequest,
+    SegmentSymptomsRequest,
+)
+from meldai.api.res_dtos import (
+    BatchSymptomMatchResponse,
+    ChiefComplaintsActionResponse,
+    ChiefComplaintsRunStatusResponse,
+    EmbedResponse,
+    HPOMatchItem,
+    MONDOMatchItem,
+    PatientDiagnosisMigrationResponse,
+    PatientMedicationMigrationResponse,
+    PatientVisitMigrationResponse,
+    SegmentSymptomsResponse,
+    SymptomItem,
+    SymptomMatchResult,
+)
 from meldai.config import get_settings
 from meldai.db.mongodb import MongoKnowledgeBase
 from meldai.db.postgres import PostgresSource
@@ -24,114 +41,6 @@ logger = logging.getLogger(__name__)
 
 api_router = APIRouter(prefix="/api/v1")
 
-
-# ---------------------------------------------------------------------------
-# Request & Response Schemas
-# ---------------------------------------------------------------------------
-
-class EmbedRequest(BaseModel):
-    terms: List[str]
-
-
-class EmbedResponse(BaseModel):
-    terms: List[str]
-    dimension: int
-    embeddings: List[List[float]]
-
-
-class SegmentSymptomsRequest(BaseModel):
-    note: str
-
-
-class SymptomItem(BaseModel):
-    note: str
-    isPheno: bool
-    embedding: Optional[List[float]] = None
-    hpoCode: Optional[int] = None
-
-    model_config = ConfigDict(exclude_none=True)
-
-
-class SegmentSymptomsResponse(BaseModel):
-    symptoms: List[SymptomItem]
-
-
-class BatchSymptomMatchRequest(BaseModel):
-    symptoms: List[str] = Field(..., description="Array of raw clinical symptom text strings", min_length=1)
-    top_k: int = Field(3, ge=1, le=10, description="Top K ontology matches to return per symptom")
-
-
-class HPOMatchItem(BaseModel):
-    hpo_id: str
-    code: Optional[int] = None
-    label: str
-    match_type: str
-    score: Optional[float] = None
-
-
-class MONDOMatchItem(BaseModel):
-    mondo_id: str
-    code: Optional[int] = None
-    label: str
-    match_type: str
-    score: Optional[float] = None
-
-
-class SymptomMatchResult(BaseModel):
-    symptom: str
-    search_target: str
-    assertion_status: str
-    is_negated: bool
-    is_phenotype: bool
-    hpo_matches: List[HPOMatchItem]
-    mondo_matches: List[MONDOMatchItem]
-
-
-class BatchSymptomMatchResponse(BaseModel):
-    total_symptoms: int
-    matches: List[SymptomMatchResult]
-
-
-class PatientVisitMigrationResponse(BaseModel):
-
-    status: str
-    batch_size: int
-    total_records_processed: int
-    batches_processed: int
-    upserted_count: int
-    modified_count: int
-    matched_count: int
-
-
-class PatientDiagnosisMigrationResponse(BaseModel):
-    status: str
-    batch_size: int
-    total_encounters_processed: int
-    batches_processed: int
-    modified_count: int
-    matched_count: int
-    unique_terms_indexed: int
-    execution_time_seconds: float
-
-
-class ChiefComplaintsRunStatusResponse(BaseModel):
-    status: str
-    batch_size: int
-    current_batch: int
-    total_batches: int
-    total_rows_processed: int
-    documents_updated: int
-    documents_skipped: int
-    current_step: str
-    start_time: Optional[float] = None
-    elapsed_seconds: float
-    error: Optional[str] = None
-
-
-class ChiefComplaintsActionResponse(BaseModel):
-    status: str
-    message: str
-    batch_size: Optional[int] = None
 
 
 
@@ -337,6 +246,30 @@ def migrate_patient_diagnoses(
     except Exception as exc:
         logger.error("Patient diagnosis migration failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Patient diagnosis migration failed: {str(exc)}")
+
+
+# ---------------------------------------------------------------------------
+# Patient Medication/Prescription Migration (PostgreSQL -> MongoDB)
+# ---------------------------------------------------------------------------
+
+@api_router.post("/cases/migrate-patient-prescriptions", response_model=PatientMedicationMigrationResponse)
+def migrate_patient_prescriptions(
+    batch_size: int = Query(1000, ge=1, le=10000, description="Batch size for extracting and pushing records"),
+) -> PatientMedicationMigrationResponse:
+    """Stream grouped patient prescription/medication data from PostgreSQL and patch MongoDB case documents.
+
+    Non-destructive patching:
+    Patches only the 'medications' field (list of medicine names) using MongoDB $set operator,
+    matching documents on compound key (caseNo + visitDate).
+    """
+    try:
+        migration_svc = _get_migration_service()
+        result = migration_svc.migrate_patient_prescriptions(batch_size=batch_size)
+        return PatientMedicationMigrationResponse(**result)
+    except Exception as exc:
+        logger.error("Patient prescription migration failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Patient prescription migration failed: {str(exc)}")
+
 
 
 # ---------------------------------------------------------------------------

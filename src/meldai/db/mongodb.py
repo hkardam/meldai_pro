@@ -282,6 +282,27 @@ class MongoKnowledgeBase:
             "matched_count": result.matched_count,
         }
 
+    def update_cases_medications_bulk(
+        self, updates: List[Tuple[Any, List[str]]]
+    ) -> Dict[str, int]:
+        """Bulk non-destructively patch medications array on multiple case documents.
+
+        Uses the MongoDB $set operator so ONLY the 'medications' field is updated.
+        Existing fields (diagnosis, symptoms, visitReason, etc.) are strictly preserved.
+        """
+        if not updates:
+            return {"modified_count": 0, "matched_count": 0}
+
+        operations = [
+            UpdateOne({"_id": doc_id}, {"$set": {"medications": medications}})
+            for doc_id, medications in updates
+        ]
+        result = self.cases.bulk_write(operations, ordered=False)
+        return {
+            "modified_count": result.modified_count,
+            "matched_count": result.matched_count,
+        }
+
     def close(self) -> None:
         """Close MongoDB connection pool."""
         if self._client:

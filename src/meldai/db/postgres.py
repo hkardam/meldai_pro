@@ -242,6 +242,66 @@ class PostgresSource:
         with self.engine.connect() as conn:
             return conn.execute(query).scalar() or 0
 
+    def stream_patient_prescriptions(self, batch_size: int = 1000):
+        """
+        Extract patient prescription data grouped by Case No and Visit Date from 'temp_migrations.patient_prescription_data'.
+        Aggregates medicine names into an array per encounter.
+        Yields list of dicts for each batch: [{"caseNo": int/str, "visitDate": str, "medications": list[str]}].
+        """
+        query = text("""
+            SELECT 
+                ppd."Case No", 
+                ppd."Visit Date", 
+                ARRAY_AGG(ppd."Medicine Name") AS medications 
+            FROM temp_migrations.patient_prescription_data ppd 
+            GROUP BY ppd."Case No", ppd."Visit Date" 
+            ORDER BY "Case No"
+        """)
+
+        def _parse_case_no(val: Optional[str]) -> Any:
+            if val is None:
+                return 0
+            if isinstance(val, int):
+                return val
+            s_val = str(val).strip()
+            if s_val.isdigit():
+                return int(s_val)
+            digits = "".join(filter(str.isdigit, s_val))
+            if digits:
+                return int(digits)
+            return s_val
+
+        with self.engine.connect() as conn:
+            result = conn.execution_options(yield_per=batch_size).execute(query)
+            while True:
+                rows = result.fetchmany(batch_size)
+                if not rows:
+                    break
+                batch = []
+                for row in rows:
+                    raw_case_no, visit_date, medications = row[0], row[1], row[2]
+                    case_no = _parse_case_no(raw_case_no)
+                    med_list = [m for m in (medications or []) if m is not None]
+                    batch.append({
+                        "caseNo": case_no,
+                        "visitDate": visit_date,
+                        "medications": med_list,
+                    })
+                logger.info("Fetched batch of %d grouped prescription records from PostgreSQL", len(batch))
+                yield batch
+
+    def get_patient_prescriptions_count(self) -> int:
+        """Get total grouped encounter count for patient prescription data in PostgreSQL."""
+        query = text("""
+            SELECT COUNT(*) FROM (
+                SELECT 1
+                FROM temp_migrations.patient_prescription_data ppd
+                GROUP BY ppd."Case No", ppd."Visit Date"
+            ) sub
+        """)
+        with self.engine.connect() as conn:
+            return conn.execute(query).scalar() or 0
+
     def close(self) -> None:
         """Dispose of the connection pool."""
         if self._engine:
