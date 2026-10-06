@@ -24,6 +24,7 @@ class PatientInfoInput(BaseModel):
 
 class FindSimilarCaseRequest(BaseModel):
     caseNo: Optional[int] = Field(default=None, description="Case number, if known")
+    caseDate: Optional[str] = Field(default=None, description="ISO date of the current case e.g. '2024-03-15'. Past cases have visitDate < caseDate.")
     patientInfo: PatientInfoInput = Field(default_factory=PatientInfoInput)
     symptoms: List[str] = Field(default_factory=list, description="Raw symptom strings e.g. ['lack of sleep']")
     diagnosis: List[str] = Field(default_factory=list, description="Raw diagnosis strings e.g. ['Insomnia']")

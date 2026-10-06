@@ -397,10 +397,11 @@ def match_symptoms_batch(
 def find_similar_cases(
     payload: FindSimilarCaseRequest,
 ) -> FindSimilarCaseResponse:
-    """Enrich case symptoms and diagnoses with HPO/MONDO terms and retrieve similar cases."""
+    """Enrich case symptoms and diagnoses with HPO/MONDO terms, fetch past visits, and retrieve similar cases."""
     try:
         case_svc = _get_case_service()
-        return case_svc.find_similar_cases(payload)
+        mongo_kb = MongoKnowledgeBase()
+        return case_svc.find_similar_cases(payload, mongo_kb=mongo_kb)
     except Exception as exc:
         logger.error("Find similar cases failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Find similar cases failed: {str(exc)}")

@@ -148,4 +148,5 @@ class DecoratedCase(BaseModel):
 
 class FindSimilarCaseResponse(BaseModel):
     decoratedCase: DecoratedCase
+    pastCases: List[Any] = Field(default_factory=list, description="Prior visits with matching caseNo and visitDate < caseDate")
     similarCases: List[Any] = Field(default_factory=list, description="List of similar cases found")

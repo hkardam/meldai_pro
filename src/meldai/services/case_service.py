@@ -13,6 +13,7 @@ from meldai.api.res_dtos import (
     FindSimilarCaseResponse,
 )
 from meldai.config import Settings, get_settings
+from meldai.db.mongodb import MongoKnowledgeBase
 from meldai.nlp.sapbert import SapBERTEmbedder, get_sapbert_embedder
 from meldai.services.assertion_service import ClinicalAssertionService
 from meldai.terminology.hpo import HPOService, get_hpo_service
@@ -53,6 +54,10 @@ class CaseService:
             return self._embedder
         return get_sapbert_embedder(self._settings)
 
+    # ------------------------------------------------------------------
+    # Case decoration
+    # ------------------------------------------------------------------
+
     def decorate_case(
         self,
         case_no: Optional[int],
@@ -60,7 +65,9 @@ class CaseService:
         symptoms: List[str],
         diagnosis: List[str],
     ) -> DecoratedCase:
-        """Decorate a clinical case by resolving symptoms to HPO, diagnoses to MONDO, and generating per-term dense embeddings."""
+        """Decorate a clinical case by resolving symptoms to HPO, diagnoses to MONDO,
+        and generating per-term dense SapBERT embeddings."""
+
         # 1. Process symptoms
         decorated_symptoms: List[DecoratedSymptomItem] = []
         if symptoms:
@@ -97,7 +104,7 @@ class CaseService:
 
                     resolved_assertions.append((assertion, hpo_term, hpo_code))
 
-                # Batch embed symptom terms
+                # Batch embed all symptom terms in a single SapBERT call
                 vectors = embedder.embed_entities(symptom_terms_to_embed)
 
                 for i, (assertion, hpo_term, hpo_code) in enumerate(resolved_assertions):
@@ -145,7 +152,7 @@ class CaseService:
 
                     resolved_diagnoses.append((d_text, mondo_term, mondo_code))
 
-                # Batch embed diagnosis terms
+                # Batch embed all diagnosis terms in a single SapBERT call
                 vectors = embedder.embed_entities(clean_diagnoses)
 
                 for i, (d_text, mondo_term, mondo_code) in enumerate(resolved_diagnoses):
@@ -172,15 +179,57 @@ class CaseService:
             diagnosis=decorated_diagnoses,
         )
 
-    def find_similar_cases(self, request: FindSimilarCaseRequest) -> FindSimilarCaseResponse:
-        """Enrich the input case and query for similar cases."""
+    # ------------------------------------------------------------------
+    # Past cases
+    # ------------------------------------------------------------------
+
+    def _fetch_past_cases(
+        self,
+        case_no: int,
+        case_date: str,
+        mongo_kb: MongoKnowledgeBase,
+    ) -> List[Dict[str, Any]]:
+        """Query MongoDB for all visits of caseNo with visitDate < case_date."""
+        try:
+            docs = mongo_kb.find_past_cases(case_no, case_date)
+            logger.info(
+                "Past cases for caseNo=%s before %s: %d found",
+                case_no, case_date, len(docs),
+            )
+            return docs
+        except Exception as exc:
+            logger.warning("Past case query failed for caseNo=%s: %s", case_no, exc)
+            return []
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    def find_similar_cases(
+        self,
+        request: FindSimilarCaseRequest,
+        mongo_kb: Optional[MongoKnowledgeBase] = None,
+    ) -> FindSimilarCaseResponse:
+        """Enrich the input case, fetch past visits, and query for similar cases."""
+
         decorated_case = self.decorate_case(
             case_no=request.caseNo,
             patient_info=request.patientInfo,
             symptoms=request.symptoms,
             diagnosis=request.diagnosis,
         )
+
+        # Fetch past cases when caseNo + caseDate are both provided
+        past_cases: List[Dict[str, Any]] = []
+        if request.caseNo is not None and request.caseDate and mongo_kb is not None:
+            past_cases = self._fetch_past_cases(
+                case_no=request.caseNo,
+                case_date=request.caseDate,
+                mongo_kb=mongo_kb,
+            )
+
         return FindSimilarCaseResponse(
             decoratedCase=decorated_case,
+            pastCases=past_cases,
             similarCases=[],
         )

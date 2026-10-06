@@ -339,6 +339,19 @@ class MongoKnowledgeBase:
             result.setdefault(cn, []).append(doc)
         return result
 
+    def find_past_cases(self, case_no: int, before_date: str) -> List[Dict[str, Any]]:
+        """Fetch all visits for a given caseNo whose visitDate is strictly before before_date.
+
+        Results are returned sorted by visitDate ascending (oldest first).
+        Relies on visitDate being stored as ISO 8601 strings ('YYYY-MM-DD') so that
+        lexicographic ordering equals chronological ordering.
+        """
+        cursor = self.cases.find(
+            {"caseNo": case_no, "visitDate": {"$lt": before_date}},
+            {"_id": 0},
+        ).sort("visitDate", ASCENDING)
+        return list(cursor)
+
     def update_cases_demographics_bulk(
         self, updates: List[Tuple[Any, Dict[str, Any]]]
     ) -> Dict[str, int]:

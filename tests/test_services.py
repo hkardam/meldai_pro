@@ -347,7 +347,8 @@ def test_case_service_decorate_and_find_similar():
         diagnosis=["Insomia"],
     )
 
-    res = case_svc.find_similar_cases(req)
+    res = case_svc.find_similar_cases(req, mongo_kb=None)
+    assert res.pastCases == []
     assert res.similarCases == []
 
     dec_case = res.decoratedCase
@@ -384,3 +385,72 @@ def test_case_service_decorate_and_find_similar():
     assert len(d1.embedding) == 768
     assert d1.similarity is None
 
+
+def test_case_service_past_cases_populated():
+    """When caseNo + caseDate are provided, past visits with visitDate < caseDate are returned."""
+    mock_nlp = MagicMock()
+    mock_nlp.analyze.side_effect = lambda term: _make_mock_doc(term, ent_text=term, is_negated=False)
+    assertion_svc = ClinicalAssertionService(nlp_service=mock_nlp)
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_entities.side_effect = lambda terms: np.ones((len(terms), 768), dtype=np.float32)
+
+    case_svc = CaseService(
+        assertion_service=assertion_svc,
+        hpo_service=MagicMock(),
+        mondo_service=MagicMock(),
+        embedder=mock_embedder,
+    )
+
+    past_doc_1 = {"caseNo": 101, "visitDate": "2023-01-10", "visitReason": "fever", "symptoms": [], "diagnosis": []}
+    past_doc_2 = {"caseNo": 101, "visitDate": "2023-06-20", "visitReason": "headache", "symptoms": [], "diagnosis": []}
+
+    mock_mongo = MagicMock()
+    mock_mongo.find_past_cases.return_value = [past_doc_1, past_doc_2]
+
+    req = FindSimilarCaseRequest(
+        caseNo=101,
+        caseDate="2024-01-01",
+        patientInfo=PatientInfoInput(age=45.0, gender="Male"),
+        symptoms=[],
+        diagnosis=[],
+    )
+
+    res = case_svc.find_similar_cases(req, mongo_kb=mock_mongo)
+
+    mock_mongo.find_past_cases.assert_called_once_with(case_no=101, before_date="2024-01-01")
+    assert len(res.pastCases) == 2
+    assert res.pastCases[0]["visitDate"] == "2023-01-10"
+    assert res.pastCases[1]["visitDate"] == "2023-06-20"
+    assert res.similarCases == []
+
+
+def test_case_service_past_cases_skipped_when_no_case_date():
+    """pastCases should be empty and MongoDB not called when caseDate is absent."""
+    mock_nlp = MagicMock()
+    mock_nlp.analyze.side_effect = lambda term: _make_mock_doc(term, ent_text=term, is_negated=False)
+    assertion_svc = ClinicalAssertionService(nlp_service=mock_nlp)
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_entities.side_effect = lambda terms: np.ones((len(terms), 768), dtype=np.float32)
+
+    mock_mongo = MagicMock()
+
+    case_svc = CaseService(
+        assertion_service=assertion_svc,
+        hpo_service=MagicMock(),
+        mondo_service=MagicMock(),
+        embedder=mock_embedder,
+    )
+
+    req = FindSimilarCaseRequest(
+        caseNo=101,
+        # no caseDate
+        symptoms=[],
+        diagnosis=[],
+    )
+
+    res = case_svc.find_similar_cases(req, mongo_kb=mock_mongo)
+
+    mock_mongo.find_past_cases.assert_not_called()
+    assert res.pastCases == []
