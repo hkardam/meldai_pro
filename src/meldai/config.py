@@ -62,6 +62,24 @@ class Settings(BaseSettings):
     device: str = Field(default="cpu", description="Inference device: cpu or cuda")
     embedding_batch_size: int = Field(default=16, description="Batch size for embedding generation")
 
+    # Clinical NLP (BioLORD)
+    biolord_model_name: str = Field(
+        default="FremyCompany/BioLORD-2023",
+        description="BioLORD model for clinical concept and medicine representation",
+    )
+    biolord_batch_size: int = Field(
+        default=32,
+        description="Batch size for BioLORD embedding generation",
+    )
+    biolord_max_length: int = Field(
+        default=128,
+        description="Max sequence length for BioLORD tokenization",
+    )
+    medicine_master_json_path: str = Field(
+        default="data/medication/local_medicine_master.json",
+        description="Path to local medicine master JSON dataset",
+    )
+
     # Terminology Service (HPO + MONDO — offline OBO files)
     hpo_obo_path: str = Field(
         default="data/ontologies/hp.obo",
@@ -70,6 +88,20 @@ class Settings(BaseSettings):
     mondo_obo_path: str = Field(
         default="data/ontologies/mondo.obo",
         description="Local path to the MONDO OBO file (mondo.obo)",
+    )
+
+    # LLM Service (Google Gemini)
+    gemini_api_key: Optional[str] = Field(
+        default=None,
+        description="Google Gemini API key for clinical prescription recommendation",
+    )
+    gemini_model_name: str = Field(
+        default="gemini-1.5-flash",
+        description="Gemini model identifier (e.g. gemini-1.5-flash, gemini-1.5-pro, gemini-2.5-flash)",
+    )
+    gemini_temperature: float = Field(
+        default=0.2,
+        description="Sampling temperature for LLM medication generation",
     )
 
 

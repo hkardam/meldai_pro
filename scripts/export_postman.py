@@ -38,6 +38,7 @@ def build_postman_collection() -> Dict[str, Any]:
         "Terminology (HPO & MONDO)": [],
         "Data Migration & Sync": [],
         "Case Similarity & Search": [],
+        "Medicine Master & BioLORD": [],
     }
 
     # 1. Health Check
@@ -670,13 +671,25 @@ def build_postman_collection() -> Dict[str, Any]:
                     "mode": "raw",
                     "raw": json.dumps(
                         {
-                            "caseNo": 101,
-                            "patientInfo": {
-                                "age": 45.0,
-                                "gender": "Male",
+                            "case": {
+                                "caseNo": 101,
+                                "caseDate": "2024-03-15",
+                                "visitType": "follow-up",
+                                "patientInfo": {
+                                    "age": 45.0,
+                                    "gender": "Male",
+                                },
+                                "symptoms": ["lack of sleep", "no fever"],
+                                "diagnosis": ["Insomia"],
                             },
-                            "symptoms": ["lack of sleep", "no fever"],
-                            "diagnosis": ["Insomia"],
+                            "top_k": 10,
+                            "params": {
+                                "wDiagnosisScore": 0.4,
+                                "wSymptomsScore": 0.4,
+                                "wPatientScore": 0.1,
+                                "wVisitTypeScore": 0.1,
+                                "sameVisitTypeOnly": False,
+                            },
                         },
                         indent=2,
                     ),
@@ -707,6 +720,7 @@ def build_postman_collection() -> Dict[str, Any]:
                         {
                             "decoratedCase": {
                                 "caseNo": 101,
+                                "visitType": "follow-up",
                                 "patientInfo": {
                                     "age": 45.0,
                                     "gender": "Male",
@@ -741,7 +755,318 @@ def build_postman_collection() -> Dict[str, Any]:
                                     },
                                 ],
                             },
-                            "similarCases": [],
+                            "pastCases": [],
+                            "similarCases": [
+                                {
+                                    "case": {
+                                        "caseNo": 201,
+                                        "visitDate": "2024-02-01",
+                                        "visitType": "follow-up",
+                                        "medication": ["paracetamol"],
+                                        "patientInfo": {"age": 45.0, "gender": "m"},
+                                        "diagnosis": [{"term": "insomnia"}],
+                                        "symptoms": [{"term": "lack of sleep"}],
+                                    },
+                                    "finalScore": 0.95,
+                                    "components": {
+                                        "diagnosis": 0.92,
+                                        "symptoms": 0.94,
+                                        "patient": 1.0,
+                                        "visitType": 1.0,
+                                    },
+                                }
+                            ],
+                        },
+                        indent=2,
+                    ),
+                }
+            ],
+        }
+    )
+
+    # 10. Prescribe Medications using Gemini LLM
+    folders["Case Similarity & Search"].append(
+        {
+            "name": "Prescribe Medications (Gemini LLM)",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json", "type": "text"},
+                    {"key": "Accept", "value": "application/json", "type": "text"},
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": json.dumps(
+                        {
+                            "case": {
+                                "caseNo": 101,
+                                "caseDate": "2024-03-15",
+                                "visitType": "follow-up",
+                                "patientInfo": {
+                                    "age": 45.0,
+                                    "gender": "Male",
+                                },
+                                "symptoms": ["lack of sleep", "fatigue"],
+                                "diagnosis": ["Insomnia"],
+                            },
+                            "top_k": 5,
+                            "params": {
+                                "wDiagnosisScore": 0.4,
+                                "wSymptomsScore": 0.4,
+                                "wPatientScore": 0.1,
+                                "wVisitTypeScore": 0.1,
+                                "sameVisitTypeOnly": False,
+                            },
+                        },
+                        indent=2,
+                    ),
+                },
+                "url": {
+                    "raw": "{{base_url}}/api/v1/cases/prescribe-medications",
+                    "host": ["{{base_url}}"],
+                    "path": ["api", "v1", "cases", "prescribe-medications"],
+                },
+                "description": (
+                    "Decorate target clinical case, retrieve patient past encounters and similar cases with prior medications, "
+                    "construct context-rich prompt without embeddings, and prescribe medications using Gemini LLM."
+                ),
+            },
+            "response": [
+                {
+                    "name": "200 OK",
+                    "originalRequest": {
+                        "method": "POST",
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/cases/prescribe-medications",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "v1", "cases", "prescribe-medications"],
+                        },
+                    },
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "header": [{"key": "Content-Type", "value": "application/json"}],
+                    "body": json.dumps(
+                        {
+                            "medications": ["Melatonin 3mg", "Zolpidem 5mg"],
+                            "explanation": "Medications selected for adult patient presenting with insomnia and fatigue, matching doctor's historical prescription pattern in similar encounters.",
+                            "pastCasesCount": 1,
+                            "similarCasesCount": 3,
+                        },
+                        indent=2,
+                    ),
+                }
+            ],
+        }
+    )
+
+    # 15. Load Medicine Master
+    folders["Medicine Master & BioLORD"].append(
+        {
+            "name": "Load Medicine Master (JSON to MongoDB)",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json", "type": "text"},
+                    {"key": "Accept", "value": "application/json", "type": "text"},
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": json.dumps(
+                        {
+                            "file_path": "data/medication/local_medicine_master.json",
+                            "batch_size": 100,
+                            "recreate": False,
+                        },
+                        indent=2,
+                    ),
+                },
+                "url": {
+                    "raw": "{{base_url}}/api/v1/medicines/load-master",
+                    "host": ["{{base_url}}"],
+                    "path": ["api", "v1", "medicines", "load-master"],
+                },
+                "description": "Ingest local_medicine_master.json, generate BioLORD embeddings for synthesized clinical sentences, and store in MongoDB in batches of 100.",
+            },
+            "response": [
+                {
+                    "name": "200 OK",
+                    "originalRequest": {
+                        "method": "POST",
+                        "header": [{"key": "Content-Type", "value": "application/json"}],
+                        "body": {
+                            "mode": "raw",
+                            "raw": json.dumps({"batch_size": 100, "recreate": False}),
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/medicines/load-master",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "v1", "medicines", "load-master"],
+                        },
+                    },
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "body": json.dumps(
+                        {
+                            "status": "success",
+                            "collection": "medicine_master",
+                            "total_records": 349,
+                            "upserted_count": 349,
+                            "modified_count": 0,
+                            "total_in_db": 349,
+                            "batches_processed": 4,
+                            "duration_seconds": 3.42,
+                        },
+                        indent=2,
+                    ),
+                }
+            ],
+        }
+    )
+
+    # 16. BioLORD Text Embeddings
+    folders["Medicine Master & BioLORD"].append(
+        {
+            "name": "BioLORD Clinical Text Embeddings",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json", "type": "text"},
+                    {"key": "Accept", "value": "application/json", "type": "text"},
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": json.dumps(
+                        {
+                            "texts": [
+                                "Etizolam, marketed as ZOLAVIL, is used as short-term bridge therapy for generalized anxiety and associated insomnia.",
+                                "Escitalopram, marketed as ESCIREN, is used as first-line maintenance therapy for major depressive disorder.",
+                            ],
+                            "normalize": True,
+                        },
+                        indent=2,
+                    ),
+                },
+                "url": {
+                    "raw": "{{base_url}}/api/v1/biolord/embed",
+                    "host": ["{{base_url}}"],
+                    "path": ["api", "v1", "biolord", "embed"],
+                },
+                "description": "Generate 768-d BioLORD dense vector representations using multi-core inference and mean pooling.",
+            },
+            "response": [
+                {
+                    "name": "200 OK",
+                    "originalRequest": {
+                        "method": "POST",
+                        "header": [{"key": "Content-Type", "value": "application/json"}],
+                        "body": {
+                            "mode": "raw",
+                            "raw": json.dumps(
+                                {
+                                    "texts": [
+                                        "Etizolam, marketed as ZOLAVIL, is used as short-term bridge therapy for generalized anxiety and associated insomnia."
+                                    ]
+                                }
+                            ),
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/biolord/embed",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "v1", "biolord", "embed"],
+                        },
+                    },
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "body": json.dumps(
+                        {
+                            "texts": [
+                                "Etizolam, marketed as ZOLAVIL, is used as short-term bridge therapy for generalized anxiety and associated insomnia."
+                            ],
+                            "dimension": 768,
+                            "embeddings": [[0.012, -0.045, 0.089]],
+                        },
+                        indent=2,
+                    ),
+                }
+            ],
+        }
+    )
+
+    # 17. Search Medicine Master
+    folders["Medicine Master & BioLORD"].append(
+        {
+            "name": "Search Medicine Master (Semantic Similarity)",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json", "type": "text"},
+                    {"key": "Accept", "value": "application/json", "type": "text"},
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": json.dumps(
+                        {
+                            "query": "anxiety and insomnia bridge therapy",
+                            "top_k": 5,
+                            "min_score": 0.4,
+                        },
+                        indent=2,
+                    ),
+                },
+                "url": {
+                    "raw": "{{base_url}}/api/v1/medicines/search",
+                    "host": ["{{base_url}}"],
+                    "path": ["api", "v1", "medicines", "search"],
+                },
+                "description": "Search medicine master records by clinical symptom, molecule, or indication using BioLORD semantic cosine similarity.",
+            },
+            "response": [
+                {
+                    "name": "200 OK",
+                    "originalRequest": {
+                        "method": "POST",
+                        "header": [{"key": "Content-Type", "value": "application/json"}],
+                        "body": {
+                            "mode": "raw",
+                            "raw": json.dumps(
+                                {
+                                    "query": "anxiety and insomnia bridge therapy",
+                                    "top_k": 5,
+                                    "min_score": 0.4,
+                                }
+                            ),
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/medicines/search",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "v1", "medicines", "search"],
+                        },
+                    },
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "body": json.dumps(
+                        {
+                            "query": "anxiety and insomnia bridge therapy",
+                            "total_matches": 1,
+                            "matches": [
+                                {
+                                    "brand_name": "ZOLAVIL",
+                                    "canonical_molecule": "Etizolam",
+                                    "is_fdc": False,
+                                    "constituent_strengths_mg": {"Etizolam": 0.5},
+                                    "modal_strength_mg": 0.5,
+                                    "release_form": "Regular",
+                                    "dosage_tier": "STANDARD_MAINTENANCE",
+                                    "dosage_group_id": "GRP_ETIZOLAM_STANDARD",
+                                    "clinical_dosing_indication": "Short-term bridge therapy for generalized anxiety and associated insomnia.",
+                                    "digest_text": "Etizolam, marketed as ZOLAVIL, is used as short-term bridge therapy for generalized anxiety and associated insomnia.",
+                                    "similarity_score": 0.8412,
+                                }
+                            ],
                         },
                         indent=2,
                     ),

@@ -96,12 +96,20 @@ class SymptomService:
         if not hpo_res and assertion.search_target != clean_text:
             hpo_res = hpo.search(clean_text, limit=1)
 
-        hpo_id = hpo_res[0].hpo_id if hpo_res else None
-        hpo_code: Optional[int] = None
-        if hpo_id:
-            m = re.search(r"\d+", hpo_id)
-            if m:
-                hpo_code = int(m.group())
+        from meldai.utils import to_curie
+        hpo_hit = hpo_res[0] if hpo_res else None
+        hpo_score = getattr(hpo_hit, "score", 0.0) or 0.0
+        hpo_match_type = getattr(hpo_hit, "match_type", "")
+
+        # Abstain if low confidence or definition match
+        if hpo_hit and hpo_score >= 0.70 and not hpo_match_type.endswith("_definition"):
+            raw_hpo_id = hpo_hit.hpo_id
+            hpo_id = to_curie("HP", raw_hpo_id)
+            m = re.search(r"\d+", raw_hpo_id) if raw_hpo_id else None
+            hpo_code = int(m.group()) if m else None
+        else:
+            hpo_id = None
+            hpo_code = None
 
         # 3. MONDO mapping
         mondo = self._get_mondo()
@@ -109,12 +117,19 @@ class SymptomService:
         if not mondo_res and assertion.search_target != clean_text:
             mondo_res = mondo.search(clean_text, limit=1)
 
-        mondo_id = mondo_res[0].mondo_id if mondo_res else None
-        mondo_code: Optional[int] = None
-        if mondo_id:
-            m = re.search(r"\d+", mondo_id)
-            if m:
-                mondo_code = int(m.group())
+        mondo_hit = mondo_res[0] if mondo_res else None
+        mondo_score = getattr(mondo_hit, "score", 0.0) or 0.0
+        mondo_match_type = getattr(mondo_hit, "match_type", "")
+
+        # Abstain if low confidence or definition match
+        if mondo_hit and mondo_score >= 0.70 and not mondo_match_type.endswith("_definition"):
+            raw_mondo_id = mondo_hit.mondo_id
+            mondo_id = to_curie("MONDO", raw_mondo_id)
+            m = re.search(r"\d+", raw_mondo_id) if raw_mondo_id else None
+            mondo_code = int(m.group()) if m else None
+        else:
+            mondo_id = None
+            mondo_code = None
 
         entry = {
             "note": clean_text,

@@ -1,9 +1,8 @@
-# Skip Automated Test Cases Rule
+# Docker Test Execution Rule
 
 ## Objective
-Do not write or execute automated test cases (`pytest`, unit tests, integration tests). The developer will test all changes manually.
+All automated test cases (`pytest`, unit tests, integration tests) MUST be executed inside the Docker app container.
 
 ## Guidelines
-1. **No Test Authoring**: Do NOT create new test files or add new test cases to existing test suites unless explicitly requested by the user.
-2. **No Test Execution**: Do NOT run `pytest`, `docker compose run --rm app pytest`, or `make test` as part of workflows.
-3. **Manual Testing by Developer**: Assume verification and validation of code modifications will be performed manually by the developer.
+1. **Always Use Docker**: Execute tests using `docker compose exec app pytest <args>` (or `docker compose run --rm app pytest <args>`).
+2. **No Host Execution**: Never run `pytest` directly on the local host machine, as the environment dependencies reside in Docker.

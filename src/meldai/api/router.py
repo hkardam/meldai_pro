@@ -6,22 +6,32 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Body, HTTPException, Query
 from meldai.api.req_dtos import (
     BatchSymptomMatchRequest,
+    BioLORDEmbedRequest,
     EmbedRequest,
     FindSimilarCaseRequest,
+    LoadMedicineMasterRequest,
+    MedicationSearchQueryRequest,
+    MedicineSearchRequest,
+    PrescribeMedicationsRequest,
     SegmentSymptomsRequest,
 )
 from meldai.api.res_dtos import (
     BatchSymptomMatchResponse,
+    BioLORDEmbedResponse,
     ChiefComplaintsActionResponse,
     ChiefComplaintsRunStatusResponse,
     EmbedResponse,
     FindSimilarCaseResponse,
     HPOMatchItem,
+    LoadMedicineMasterResponse,
+    MedicationSearchQueryResponse,
+    MedicineSearchResponse,
     MONDOMatchItem,
     PatientDemographicsMigrationResponse,
     PatientDiagnosisMigrationResponse,
     PatientMedicationMigrationResponse,
     PatientVisitMigrationResponse,
+    PrescribeMedicationsResponse,
     SegmentSymptomsResponse,
     SymptomItem,
     SymptomMatchResult,
@@ -30,12 +40,16 @@ from meldai.api.res_dtos import (
 from meldai.config import get_settings
 from meldai.db.mongodb import MongoKnowledgeBase
 from meldai.db.postgres import PostgresSource
+from meldai.nlp.biolord import BioLORDEmbedder, get_biolord_embedder
 from meldai.nlp.medspacy_nlp import get_medspacy_service
 from meldai.nlp.sapbert import SapBERTEmbedder, get_sapbert_embedder
 from meldai.services.assertion_service import ClinicalAssertionService
 from meldai.services.case_service import CaseService
 from meldai.services.chief_complaints_runner import get_chief_complaints_runner
+from meldai.services.gemini_service import get_gemini_service
+from meldai.services.medicine_master_service import MedicineMasterService
 from meldai.services.migration_service import MigrationService
+from meldai.services.prescription_service import PrescriptionService
 from meldai.services.symptom_service import SymptomService
 from meldai.services.terminology_service import TerminologySearchService
 from meldai.terminology.hpo import HPOResult, get_hpo_service
@@ -109,6 +123,30 @@ def _get_migration_service() -> MigrationService:
         postgres_source=pg,
         mongo_kb=mongo,
         symptom_service=symptom_svc,
+    )
+
+
+def _get_prescription_service() -> PrescriptionService:
+    settings = get_settings()
+    case_svc = _get_case_service()
+    mongo = MongoKnowledgeBase(settings)
+    gemini = get_gemini_service(settings)
+    return PrescriptionService(
+        settings=settings,
+        case_service=case_svc,
+        mongo_kb=mongo,
+        gemini_service=gemini,
+    )
+
+
+def _get_medicine_master_service() -> MedicineMasterService:
+    settings = get_settings()
+    mongo = MongoKnowledgeBase(settings)
+    biolord = get_biolord_embedder(settings)
+    return MedicineMasterService(
+        settings=settings,
+        mongo_kb=mongo,
+        biolord_embedder=biolord,
     )
 
 
@@ -324,6 +362,21 @@ def migrate_patient_demographics(
 
 
 @api_router.post(
+    "/cases/migrate-patient-chief-complaints",
+)
+def migrate_patient_chief_complaints(
+    batch_size: int = Query(100, ge=1, le=10000, description="Batch size for extracting and pushing records"),
+) -> Dict[str, Any]:
+    """Synchronous migration of patient chief complaints from PostgreSQL to MongoDB."""
+    try:
+        migration_svc = _get_migration_service()
+        return migration_svc.migrate_patient_chief_complaints(batch_size=batch_size)
+    except Exception as exc:
+        logger.error("Patient chief complaints migration failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Patient chief complaints migration failed: {str(exc)}")
+
+
+@api_router.post(
     "/cases/migrate-patient-chief-complaints/start",
     response_model=ChiefComplaintsActionResponse,
 )
@@ -405,6 +458,131 @@ def find_similar_cases(
     except Exception as exc:
         logger.error("Find similar cases failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Find similar cases failed: {str(exc)}")
+
+
+# ---------------------------------------------------------------------------
+# Prescribe Medications (Clinical Case Enrichment + Gemini LLM)
+# ---------------------------------------------------------------------------
+
+@api_router.post(
+    "/cases/prescribe-medications",
+    response_model=PrescribeMedicationsResponse,
+    summary="Recommend prescribed medications for a clinical case using Gemini LLM",
+)
+def prescribe_medications(
+    payload: PrescribeMedicationsRequest,
+) -> PrescribeMedicationsResponse:
+    """Enrich case with HPO/MONDO codes, retrieve past encounters and similar cases with prior medications,
+    and generate medication prescription recommendations using Gemini LLM."""
+    try:
+        prescription_svc = _get_prescription_service()
+        return prescription_svc.prescribe_medications(payload)
+    except Exception as exc:
+        logger.error("Prescribe medications failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Prescribe medications failed: {str(exc)}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Medicine Master Ingestion & BioLORD Vector Embeddings
+# ---------------------------------------------------------------------------
+
+@api_router.post(
+    "/medicines/load-master",
+    response_model=LoadMedicineMasterResponse,
+    summary="Load and embed medicine master dataset into MongoDB",
+)
+def load_medicine_master(
+    payload: Optional[LoadMedicineMasterRequest] = None,
+) -> LoadMedicineMasterResponse:
+    """Ingest local_medicine_master.json, generate BioLORD embeddings for synthesized clinical sentences,
+    and store in MongoDB 'medicine_master' in batches of 100."""
+    try:
+        req = payload or LoadMedicineMasterRequest()
+        svc = _get_medicine_master_service()
+        result = svc.load_and_embed_master(
+            file_path=req.file_path,
+            batch_size=req.batch_size,
+            recreate=req.recreate,
+        )
+        return LoadMedicineMasterResponse(**result)
+    except Exception as exc:
+        logger.error("Medicine master loading failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Medicine master loading failed: {str(exc)}")
+
+
+@api_router.post(
+    "/biolord/embed",
+    response_model=BioLORDEmbedResponse,
+    summary="Generate BioLORD vector embeddings for clinical texts",
+)
+def generate_biolord_embeddings(
+    payload: BioLORDEmbedRequest,
+) -> BioLORDEmbedResponse:
+    """Generate 768-d BioLORD dense vector representations using multi-core inference and mean pooling."""
+    try:
+        embedder = get_biolord_embedder()
+        vectors = embedder.embed_texts(payload.texts, normalize=payload.normalize)
+        return BioLORDEmbedResponse(
+            texts=payload.texts,
+            dimension=vectors.shape[1] if len(vectors) > 0 else 768,
+            embeddings=vectors.tolist(),
+        )
+    except Exception as exc:
+        logger.error("BioLORD embedding generation failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"BioLORD embedding error: {str(exc)}")
+
+
+@api_router.post(
+    "/medicines/search",
+    response_model=MedicineSearchResponse,
+    summary="Semantic search over medicine master collection using BioLORD embeddings",
+)
+def search_medicines(
+    payload: MedicineSearchRequest,
+) -> MedicineSearchResponse:
+    """Search medicine master records by clinical symptom, molecule, or indication using BioLORD semantic cosine similarity."""
+    try:
+        svc = _get_medicine_master_service()
+        matches = svc.search_similar_medicines(
+            query=payload.query,
+            top_k=payload.top_k,
+            min_score=payload.min_score,
+        )
+        return MedicineSearchResponse(
+            query=payload.query,
+            total_matches=len(matches),
+            matches=matches,
+        )
+    except Exception as exc:
+        logger.error("Medicine search failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Medicine search error: {str(exc)}")
+
+
+@api_router.post(
+    "/cases/medication-search-queries",
+    response_model=MedicationSearchQueryResponse,
+    summary="Construct vector semantic queries and BM25 keywords for medication search using active LLM prompt",
+)
+def generate_medication_search_queries(
+    payload: MedicationSearchQueryRequest,
+) -> MedicationSearchQueryResponse:
+    """Analyze patient symptoms and diagnosis to construct vector_semantic_queries and bm25_keywords via active_prompt.md."""
+    try:
+        gemini_svc = get_gemini_service()
+        res = gemini_svc.generate_medication_search_queries(
+            symptoms=payload.symptoms,
+            diagnosis=payload.diagnosis,
+            duration_context=payload.durationContext,
+            current_regimen=payload.currentRegimen,
+        )
+        return MedicationSearchQueryResponse(
+            vector_semantic_queries=res.get("vector_semantic_queries", []),
+            bm25_keywords=res.get("bm25_keywords", []),
+        )
+    except Exception as exc:
+        logger.error("Medication search query generation failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Medication search query generation failed: {str(exc)}") from exc
+
 
 
 

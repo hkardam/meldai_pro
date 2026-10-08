@@ -82,6 +82,22 @@ class _HPOEntry:
     definition_toks: List[str] = field(default_factory=list)
 
 
+CLINICAL_HPO_ALIASES: Dict[str, str] = {
+    "lack of sleep": "sleep disturbance",
+    "loss of sleep": "sleep disturbance",
+    "shortage of sleep": "sleep disturbance",
+    "difficulty sleeping": "sleep disturbance",
+    "trouble sleeping": "sleep disturbance",
+    "poor sleep": "poor sleep quality",
+    "lack of appetite": "loss of appetite",
+    "decreased appetite": "loss of appetite",
+    "lack of energy": "fatigue",
+    "loss of energy": "fatigue",
+    "low energy": "fatigue",
+    "lack of concentration": "poor concentration",
+}
+
+
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
@@ -176,14 +192,14 @@ class HPOService:
     # Public API
     # ------------------------------------------------------------------
 
-    def search(self, term: str, limit: int = 5) -> List[HPOResult]:
+    def search(self, term: str, limit: int = 5, min_score: float = 0.0) -> List[HPOResult]:
         """Search HPO for concepts matching *term*.
 
         Strategy (scored and ranked):
           1. Exact label match   (case-insensitive, score: 1.0)
           2. Exact synonym match (case-insensitive, score: 0.98)
-          3. Substring label match (score: 0.90 - 0.95)
-          4. Substring synonym match (score: 0.85)
+          3. Substring label match with word boundaries (score: 0.90 - 0.95)
+          4. Substring synonym match with word boundaries (score: 0.85)
           5. Token-level label match (score: 0.60 - 0.85)
           6. Token-level synonym match (score: 0.55 - 0.80)
           7. Fuzzy string match on label / synonym (score: 0.50 - 0.70)
@@ -212,6 +228,9 @@ class HPOService:
                 )
             ]
 
+        # Check clinical query alias if direct match might not exist
+        alias_norm = CLINICAL_HPO_ALIASES.get(query_norm)
+
         q_tokens = _tokenize(query_norm)
         q_effective = [t for t in q_tokens if t not in STOPWORDS] or q_tokens
 
@@ -225,10 +244,17 @@ class HPOService:
             if len(qt) >= 4:
                 candidates.update(self._token_index.get(qt[:4], ()))
 
+        if alias_norm:
+            for at in _tokenize(alias_norm):
+                candidates.update(self._token_index.get(at, ()))
+
         # Fallback to scanning all if candidates set is very small
         eval_indices = candidates if candidates else range(len(self._entries))
 
         scored_matches: List[HPOResult] = []
+
+        # Compile word-boundary regex for substring checks to prevent subword false matches (e.g. sleep in microsleep)
+        wb_pattern = re.compile(rf"\b{re.escape(query_norm)}\b")
 
         for idx in eval_indices:
             r = self._entries[idx]
@@ -236,23 +262,23 @@ class HPOService:
             best_match_type = ""
 
             # 1. Exact label match
-            if query_norm == r.label_norm:
-                best_score = 1.0
+            if query_norm == r.label_norm or (alias_norm and alias_norm == r.label_norm):
+                best_score = 1.0 if query_norm == r.label_norm else 0.95
                 best_match_type = "exact_label"
 
             # 2. Exact synonym match
-            elif query_norm in r.synonyms_norm:
-                best_score = 0.98
+            elif query_norm in r.synonyms_norm or (alias_norm and alias_norm in r.synonyms_norm):
+                best_score = 0.98 if query_norm in r.synonyms_norm else 0.93
                 best_match_type = "synonym"
 
-            # 3. Substring label match
-            elif query_norm in r.label_norm:
+            # 3. Substring label match (strictly on word boundary)
+            elif wb_pattern.search(r.label_norm):
                 len_ratio = len(query_norm) / max(len(r.label_norm), 1)
                 best_score = 0.90 + 0.05 * len_ratio
                 best_match_type = "substring_label"
 
-            # 4. Substring synonym match
-            elif any(query_norm in sn for sn in r.synonyms_norm):
+            # 4. Substring synonym match (strictly on word boundary)
+            elif any(wb_pattern.search(sn) for sn in r.synonyms_norm):
                 best_score = 0.85
                 best_match_type = "substring_synonym"
 
@@ -291,7 +317,7 @@ class HPOService:
                             best_score = 0.40 + 0.10 * d_tok
                             best_match_type = "token_definition"
 
-            if best_score > 0.0:
+            if best_score > 0.0 and best_score >= min_score:
                 scored_matches.append(
                     HPOResult(
                         hpo_id=r.hpo_id,

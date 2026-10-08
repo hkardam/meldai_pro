@@ -178,14 +178,14 @@ class MONDOService:
     # Public API
     # ------------------------------------------------------------------
 
-    def search(self, term: str, limit: int = 5) -> List[MONDOResult]:
+    def search(self, term: str, limit: int = 5, min_score: float = 0.0) -> List[MONDOResult]:
         """Search MONDO for disease concepts matching *term*.
 
         Strategy (scored and ranked):
           1. Exact label match   (case-insensitive, score: 1.0)
           2. Exact synonym match (case-insensitive, score: 0.98)
-          3. Substring label match (score: 0.90 - 0.95)
-          4. Substring synonym match (score: 0.85)
+          3. Substring label match with word boundaries (score: 0.90 - 0.95)
+          4. Substring synonym match with word boundaries (score: 0.85)
           5. Token-level label match (score: 0.60 - 0.85)
           6. Token-level synonym match (score: 0.55 - 0.80)
           7. Fuzzy string match on label / synonym (score: 0.50 - 0.70)
@@ -228,6 +228,7 @@ class MONDOService:
         eval_indices = candidates if candidates else range(len(self._entries))
 
         scored_matches: List[MONDOResult] = []
+        wb_pattern = re.compile(rf"\b{re.escape(query_norm)}\b")
 
         for idx in eval_indices:
             r = self._entries[idx]
@@ -244,14 +245,14 @@ class MONDOService:
                 best_score = 0.98
                 best_match_type = "synonym"
 
-            # 3. Substring label match
-            elif query_norm in r.label_norm:
+            # 3. Substring label match (strictly on word boundary)
+            elif wb_pattern.search(r.label_norm):
                 len_ratio = len(query_norm) / max(len(r.label_norm), 1)
                 best_score = 0.90 + 0.05 * len_ratio
                 best_match_type = "substring_label"
 
-            # 4. Substring synonym match
-            elif any(query_norm in sn for sn in r.synonyms_norm):
+            # 4. Substring synonym match (strictly on word boundary)
+            elif any(wb_pattern.search(sn) for sn in r.synonyms_norm):
                 best_score = 0.85
                 best_match_type = "substring_synonym"
 
@@ -290,7 +291,7 @@ class MONDOService:
                             best_score = 0.40 + 0.10 * d_tok
                             best_match_type = "token_definition"
 
-            if best_score > 0.0:
+            if best_score > 0.0 and best_score >= min_score:
                 scored_matches.append(
                     MONDOResult(
                         mondo_id=r.mondo_id,

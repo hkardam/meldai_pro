@@ -16,17 +16,17 @@ graph LR
 
     subgraph Clinical Science Core (Docker)
         APP[MeldAI Pipeline]
-        SAP[SapBERT\nPubMedBERT Embeddings]
-        SNOMED[Snowstorm\nSNOMED CT REST]
+        SAP[SapBERT & BioLORD\nClinical Embeddings]
+        ONT[HPO & MONDO\nOffline Ontologies]
     end
 
     subgraph Internal Knowledge Base (Docker)
-        MONGO[(MongoDB 7.0\nCases Knowledge Base)]
+        MONGO[(MongoDB 7.0\nKnowledge Base)]
     end
 
     PG -.->|External Connection| APP
-    APP -->|Generate 768-d Vectors| SAP
-    APP -->|Standardize Concepts| SNOMED
+    APP -->|Generate Dense Vectors| SAP
+    APP -->|Map Concepts Offline| ONT
     APP -->|Sink Enriched Cases| MONGO
 ```
 
@@ -53,16 +53,16 @@ Each clinical case processed by the pipeline is standardized and stored in the i
   "symptoms": [
     {
       "text": "substernal chest pressure",
-      "snomedTitle": "Chest pain",
-      "snomedCode": 29857009,
+      "hpoTerm": "Chest pain",
+      "hpoId": "HP:0001635",
       "embedding": [-0.0142, 0.0891, "...768-dim vector..."]
     }
   ],
   "diagnosis": [
     {
       "text": "acute myocardial infarction",
-      "snomedTitle": "Myocardial infarction",
-      "snomedCode": 22298006,
+      "mondoTerm": "Acute myocardial infarction",
+      "mondoCode": 8807,
       "embedding": [0.0345, -0.0112, "...768-dim vector..."]
     }
   ]
@@ -99,13 +99,13 @@ make up
 ```
 
 ### 2. Verify Health Status
-Check that external PostgreSQL, internal MongoDB, and Snowstorm connectivity are operational:
+Check that external PostgreSQL, internal MongoDB, and ontology paths are operational:
 ```bash
 docker compose run --rm app python -m meldai.main check-health
 ```
 
 ### 3. Run the Clinical Pipeline
-Extract training cases, generate SapBERT embeddings, map to SNOMED CT, and sink into MongoDB:
+Extract training cases, generate clinical embeddings, map phenotypes/diseases, and sink into MongoDB:
 ```bash
 make run-pipeline
 # or: docker compose run --rm app python -m meldai.main run-demo
@@ -139,9 +139,10 @@ This project has first-class support for **debugging live Python code running in
 docker compose run --rm app python -m meldai.main embed "acute myocardial infarction"
 ```
 
-### 2. Map Clinical Terms to SNOMED CT
+### 2. Download Offline Ontologies (HPO & MONDO)
 ```bash
-docker compose run --rm app python -m meldai.main map-snomed "Type 2 diabetes mellitus"
+make download-ontologies
+# or: docker compose run --rm app python scripts/download_ontologies.py
 ```
 
 ### 3. Interactive Shell
@@ -167,7 +168,7 @@ When you are ready to expose this as a web application:
    ```
 2. Interactive Swagger / OpenAPI documentation is immediately available at:
    - **http://localhost:8000/docs**
-   - Endpoints include `/api/v1/health`, `/api/v1/embed`, and `/api/v1/snomed/search`.
+   - Endpoints include `/api/v1/health`, `/api/v1/embed`, `/api/v1/biolord/embed`, and `/api/v1/medicines/search`.
 
 3. **Postman API Collection**:
    - Ready-to-import Postman collection: `postman/meldai_postman_collection.json`

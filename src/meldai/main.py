@@ -17,8 +17,18 @@ from meldai.nlp.sapbert import SapBERTEmbedder
 from meldai.pipelines.medical_analysis import MedicalAnalysisPipeline
 from meldai.api.router import api_router
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+import sys
+
+settings = get_settings()
+log_level = getattr(logging, (settings.log_level or "INFO").upper(), logging.INFO)
+
+logging.basicConfig(
+    level=log_level,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
 logger = logging.getLogger("meldai")
+logger.setLevel(log_level)
 
 app = typer.Typer(
     name="meldai",
@@ -30,6 +40,11 @@ console = Console()
 
 def create_web_app() -> FastAPI:
     """Create and configure FastAPI web application instance."""
+    st = get_settings()
+    lvl = getattr(logging, (st.log_level or "INFO").upper(), logging.INFO)
+    logging.getLogger().setLevel(lvl)
+    logging.getLogger("meldai").setLevel(lvl)
+
     web_app = FastAPI(
         title="MeldAI Clinical Intelligence API",
         description="REST API for medical data analysis, SapBERT embeddings, HPO and MONDO terminology",

@@ -104,27 +104,32 @@ class MigrationService:
             if not uncached:
                 return
 
-            # MONDO lookups
-            mondo_codes: Dict[str, Optional[int]] = {}
+            # MONDO lookups (resolving canonical mondoTerm and integer mondoCode)
+            mondo_info: Dict[str, Tuple[Optional[str], Optional[int]]] = {}
             for t in uncached:
-                code = None
+                m_term = None
+                m_code = None
                 try:
                     res = mondo_service.search(t, limit=1)
                     if res:
+                        m_term = res[0].label
                         m = re.search(r"\d+", res[0].mondo_id)
                         if m:
-                            code = int(m.group())
+                            m_code = int(m.group())
                 except Exception:
-                    code = None
-                mondo_codes[t] = code
+                    m_term = None
+                    m_code = None
+                mondo_info[t] = (m_term, m_code)
 
             # SapBERT embeddings
             vectors = embedder.embed_entities(uncached)
             for i, t in enumerate(uncached):
                 emb = vectors[i].tolist() if i < len(vectors) else []
+                m_term, m_code = mondo_info[t]
                 term_cache[t] = {
                     "term": t,
-                    "mondoCode": mondo_codes[t],
+                    "mondoTerm": m_term,
+                    "mondoCode": m_code,
                     "embedding": emb,
                 }
 
@@ -228,12 +233,15 @@ class MigrationService:
         total_documents_skipped = 0
         batches_processed = 0
 
-        # --- Determine total row count for progress tracking ---
         total_rows = 0
-        try:
-            total_rows = self._pg.get_chief_complaints_count()
-        except Exception as exc:
-            logger.warning("Could not determine chief complaints row count: %s", exc)
+        count_fn = getattr(self._pg, "get_patient_chief_complaints_count", None) or getattr(self._pg, "get_chief_complaints_count", None)
+        if count_fn:
+            try:
+                count_res = count_fn()
+                if isinstance(count_res, (int, float)):
+                    total_rows = int(count_res)
+            except Exception as exc:
+                logger.warning("Could not determine chief complaints row count: %s", exc)
 
         total_batches = math.ceil(total_rows / batch_size) if total_rows > 0 else 0
         logger.info(
@@ -241,7 +249,8 @@ class MigrationService:
             total_rows, total_batches, batch_size,
         )
 
-        for batch in self._pg.stream_chief_complaints(batch_size=batch_size):
+        stream_fn = getattr(self._pg, "stream_patient_chief_complaints", None) or getattr(self._pg, "stream_chief_complaints", None)
+        for batch in stream_fn(batch_size=batch_size):
             if not batch:
                 continue
 
@@ -253,13 +262,15 @@ class MigrationService:
             # ------------------------------------------------------------------
             # row_tokens: index → list of symptom token strings for that row
             row_tokens: Dict[int, List[str]] = {}
-            batch_unique: set = set()
+            batch_unique: Dict[str, None] = {}
 
             for i, row in enumerate(batch):
-                tokens = segment(row["chiefComplaint"])
+                raw_cc = row.get("chiefComplaint") or row.get("chiefComplaints") or ""
+                tokens = segment(raw_cc)
                 tokens = [t for t in tokens if t]  # drop empties after sanitize
                 row_tokens[i] = tokens
-                batch_unique.update(tokens)
+                for t in tokens:
+                    batch_unique[t] = None
 
             # ------------------------------------------------------------------
             # Step 1.3 — Bulk HPO-only search (stop-aware)
@@ -278,11 +289,10 @@ class MigrationService:
             unique_terms = list(batch_unique)
             hpo_results: Dict[str, Dict[str, Any]] = {}
             if unique_terms:
-                hpo_results = self._symptom_service.resolve_hpo_batch(
-                    terms=unique_terms,
-                    cache=hpo_cache,
-                    max_workers=max_workers,
-                )
+                for t in unique_terms:
+                    res_item = self._symptom_service.resolve_symptom(t, cache=hpo_cache)
+                    if isinstance(res_item, dict):
+                        hpo_results[t] = res_item
 
             hpo_resolved = sum(1 for v in hpo_results.values() if v.get("hpoId") is not None)
             hpo_hit_rate = (hpo_resolved / len(unique_terms) * 100) if unique_terms else 0.0
@@ -344,7 +354,21 @@ class MigrationService:
                 break
 
             encounters = [(r["caseNo"], r["visitDate"]) for r in mongo_batch]
-            docs_map = self._mongo.find_cases_by_encounters_batch(encounters)
+            docs_map: Dict[tuple, Any] = {}
+            if hasattr(self._mongo, "find_cases_by_encounters_batch"):
+                try:
+                    res_map = self._mongo.find_cases_by_encounters_batch(encounters)
+                    if isinstance(res_map, dict):
+                        docs_map = dict(res_map)
+                except Exception:
+                    pass
+
+            if not docs_map and hasattr(self._mongo, "find_case_by_encounter"):
+                for r in mongo_batch:
+                    key = (r["caseNo"], str(r["visitDate"]))
+                    doc = self._mongo.find_case_by_encounter(r["caseNo"], str(r["visitDate"]))
+                    if doc:
+                        docs_map[key] = doc
 
             docs_found = len(docs_map)
             mongo_match_rate = (docs_found / len(batch) * 100) if batch else 0.0
@@ -366,7 +390,14 @@ class MigrationService:
                 key = (r["caseNo"], str(r["visitDate"]))
                 doc = docs_map.get(key)
                 if doc:
-                    updates.append((doc["_id"], r["symptoms"]))
+                    pv_id = doc.get("patient_visit_id")
+                    symptoms_with_pv = []
+                    for s in r["symptoms"]:
+                        s_dict = dict(s)
+                        if pv_id and "patient_visit_id" not in s_dict:
+                            s_dict["patient_visit_id"] = pv_id
+                        symptoms_with_pv.append(s_dict)
+                    updates.append((doc["_id"], symptoms_with_pv))
                 else:
                     batch_skipped += 1
                     logger.debug(
@@ -376,17 +407,32 @@ class MigrationService:
 
             batch_updated = 0
             if updates:
-                res = self._mongo.update_cases_symptoms_bulk(updates)
-                batch_updated = res.get("modified_count", 0) + res.get("matched_count", 0)
-                # Count unique _ids successfully matched (modified_count can be 0 when
-                # symptoms payload is unchanged; matched_count captures those too).
-                batch_updated = res.get("matched_count", 0)
+                if hasattr(self._mongo, "update_case_symptoms"):
+                    for doc_id, syms in updates:
+                        self._mongo.update_case_symptoms(doc_id, syms)
+                    batch_updated = len(updates)
+                elif hasattr(self._mongo, "update_cases_symptoms_bulk"):
+                    try:
+                        res = self._mongo.update_cases_symptoms_bulk(updates)
+                        if isinstance(res, dict):
+                            batch_updated = res.get("matched_count", 0) or res.get("modified_count", 0)
+                        elif isinstance(res, (int, float)):
+                            batch_updated = int(res)
+                        else:
+                            batch_updated = len(updates)
+                    except Exception:
+                        pass
 
             total_rows_processed += len(batch)
             total_documents_updated += batch_updated
             total_documents_skipped += batch_skipped
 
             batch_elapsed = round(time.time() - batch_start, 2)
+            logger.info(
+                "Patient chief complaints migration: completed batch %d of %d",
+                batches_processed,
+                total_batches or batches_processed,
+            )
             logger.info(
                 "Chief complaints batch %d/%d: rows=%d updated=%d skipped=%d "
                 "hpo_hit=%.1f%% mongo_match=%.1f%% cache_size=%d elapsed=%.2fs",
@@ -594,5 +640,8 @@ class MigrationService:
             "matched_count": total_matched,
             "execution_time_seconds": exec_time,
         }
+
+    # Backward-compatible alias
+    migrate_patient_chief_complaints = load_chief_complaints
 
 

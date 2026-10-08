@@ -4,11 +4,25 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from meldai.api.req_dtos import FindSimilarCaseRequest, PatientInfoInput
+from meldai.api.req_dtos import (
+    CaseInput,
+    FindSimilarCaseRequest,
+    PatientInfoInput,
+    SimilarityParams,
+    VisitTypeEnum,
+)
 from meldai.nlp.medspacy_nlp import SegmentResult
 from meldai.services.assertion_service import ClinicalAssertionService
 from meldai.services.case_service import CaseService
 from meldai.services.migration_service import MigrationService
+from meldai.services.similarity_engine import (
+    EntityItem,
+    compute_composite_score,
+    patient_similarity,
+    set_similarity,
+    term_similarity,
+    visit_type_similarity,
+)
 from meldai.services.symptom_service import SymptomService
 from meldai.services.terminology_service import TerminologySearchService
 from meldai.terminology.hpo import HPOResult
@@ -295,19 +309,57 @@ def test_migration_service_batch_progress_logging(caplog):
         assert "Patient chief complaints migration: completed batch 1 of 2" in caplog.text
 
 
+def test_migrate_patient_diagnoses_payload_structure():
+    """Verify that migrate_patient_diagnoses formats diagnosis payloads with term, mondoTerm, mondoCode, and embedding."""
+    mock_pg = MagicMock()
+    mock_pg.get_grouped_patient_diagnoses_count.return_value = 1
+    mock_pg.stream_grouped_patient_diagnoses.return_value = [
+        [{"caseNo": 100, "visitDate": "2024-05-01", "diagnosisNames": ["Essential Hypertension"]}],
+    ]
+
+    mock_mongo = MagicMock()
+    mock_mongo.replace_case_diagnoses_batch.return_value = {"modified_count": 1, "matched_count": 1}
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_entities.return_value = np.ones((1, 768), dtype=np.float32)
+
+    migration_svc = MigrationService(
+        postgres_source=mock_pg,
+        mongo_kb=mock_mongo,
+        embedder=mock_embedder,
+    )
+
+    res = migration_svc.migrate_patient_diagnoses(batch_size=100)
+    assert res["status"] == "success"
+    mock_mongo.replace_case_diagnoses_batch.assert_called_once()
+    called_batch = mock_mongo.replace_case_diagnoses_batch.call_args[0][0]
+    assert len(called_batch) == 1
+    enc_doc = called_batch[0]
+    assert enc_doc["caseNo"] == 100
+    assert enc_doc["visitDate"] == "2024-05-01"
+    assert len(enc_doc["diagnosis"]) == 1
+    diag_item = enc_doc["diagnosis"][0]
+    assert "term" in diag_item
+    assert "mondoTerm" in diag_item
+    assert "mondoCode" in diag_item
+    assert "embedding" in diag_item
+    assert diag_item["term"] == "Essential Hypertension"
+    assert len(diag_item["embedding"]) == 768
+
+
 # ---------------------------------------------------------------------------
 # 6. CaseService tests
 # ---------------------------------------------------------------------------
 
 def test_case_service_decorate_and_find_similar():
     mock_nlp = MagicMock()
-    # Mock NLP analyze for symptom "lack of sleep" and "no fever"
     def mock_analyze(term):
         if "no fever" in term:
             return _make_mock_doc(term, ent_text="fever", is_negated=True)
         return _make_mock_doc(term, ent_text=term, is_negated=False)
 
     mock_nlp.analyze.side_effect = mock_analyze
+    mock_nlp.analyze_batch.side_effect = lambda terms, **kwargs: [mock_analyze(t) for t in terms]
     assertion_svc = ClinicalAssertionService(nlp_service=mock_nlp)
 
     mock_hpo = MagicMock()
@@ -341,10 +393,13 @@ def test_case_service_decorate_and_find_similar():
     )
 
     req = FindSimilarCaseRequest(
-        caseNo=101,
-        patientInfo=PatientInfoInput(age=45.0, gender="Male"),
-        symptoms=["lack of sleep", "no fever"],
-        diagnosis=["Insomia"],
+        case=CaseInput(
+            caseNo=101,
+            visitType=VisitTypeEnum.FOLLOW_UP,
+            patientInfo=PatientInfoInput(age=45.0, gender="Male"),
+            symptoms=["lack of sleep", "no fever"],
+            diagnosis=["Insomia"],
+        )
     )
 
     res = case_svc.find_similar_cases(req, mongo_kb=None)
@@ -353,6 +408,7 @@ def test_case_service_decorate_and_find_similar():
 
     dec_case = res.decoratedCase
     assert dec_case.caseNo == 101
+    assert dec_case.visitType == "follow-up"
     assert dec_case.patientInfo.age == 45.0
     assert dec_case.patientInfo.gender == "Male"
 
@@ -390,6 +446,7 @@ def test_case_service_past_cases_populated():
     """When caseNo + caseDate are provided, past visits with visitDate < caseDate are returned."""
     mock_nlp = MagicMock()
     mock_nlp.analyze.side_effect = lambda term: _make_mock_doc(term, ent_text=term, is_negated=False)
+    mock_nlp.analyze_batch.side_effect = lambda terms, **kwargs: [_make_mock_doc(t, ent_text=t, is_negated=False) for t in terms]
     assertion_svc = ClinicalAssertionService(nlp_service=mock_nlp)
 
     mock_embedder = MagicMock()
@@ -407,13 +464,17 @@ def test_case_service_past_cases_populated():
 
     mock_mongo = MagicMock()
     mock_mongo.find_past_cases.return_value = [past_doc_1, past_doc_2]
+    mock_mongo.find_similar_candidates.return_value = []
 
     req = FindSimilarCaseRequest(
-        caseNo=101,
-        caseDate="2024-01-01",
-        patientInfo=PatientInfoInput(age=45.0, gender="Male"),
-        symptoms=[],
-        diagnosis=[],
+        case=CaseInput(
+            caseNo=101,
+            caseDate="2024-01-01",
+            visitType=VisitTypeEnum.FOLLOW_UP,
+            patientInfo=PatientInfoInput(age=45.0, gender="Male"),
+            symptoms=[],
+            diagnosis=[],
+        )
     )
 
     res = case_svc.find_similar_cases(req, mongo_kb=mock_mongo)
@@ -422,19 +483,21 @@ def test_case_service_past_cases_populated():
     assert len(res.pastCases) == 2
     assert res.pastCases[0]["visitDate"] == "2023-01-10"
     assert res.pastCases[1]["visitDate"] == "2023-06-20"
-    assert res.similarCases == []
 
 
-def test_case_service_past_cases_skipped_when_no_case_date():
-    """pastCases should be empty and MongoDB not called when caseDate is absent."""
+def test_case_service_past_cases_defaults_to_today_when_no_case_date():
+    """When caseDate is omitted, current date is used to query prior visits."""
     mock_nlp = MagicMock()
     mock_nlp.analyze.side_effect = lambda term: _make_mock_doc(term, ent_text=term, is_negated=False)
+    mock_nlp.analyze_batch.side_effect = lambda terms, **kwargs: [_make_mock_doc(t, ent_text=t, is_negated=False) for t in terms]
     assertion_svc = ClinicalAssertionService(nlp_service=mock_nlp)
 
     mock_embedder = MagicMock()
     mock_embedder.embed_entities.side_effect = lambda terms: np.ones((len(terms), 768), dtype=np.float32)
 
     mock_mongo = MagicMock()
+    mock_mongo.find_past_cases.return_value = []
+    mock_mongo.find_similar_candidates.return_value = []
 
     case_svc = CaseService(
         assertion_service=assertion_svc,
@@ -444,13 +507,336 @@ def test_case_service_past_cases_skipped_when_no_case_date():
     )
 
     req = FindSimilarCaseRequest(
-        caseNo=101,
-        # no caseDate
-        symptoms=[],
-        diagnosis=[],
+        case=CaseInput(
+            caseNo=101,
+            caseDate=None,
+            visitType=VisitTypeEnum.FOLLOW_UP,
+            symptoms=[],
+            diagnosis=[],
+        )
+    )
+
+    case_svc.find_similar_cases(req, mongo_kb=mock_mongo)
+    assert mock_mongo.find_past_cases.called
+    call_kwargs = mock_mongo.find_past_cases.call_args[1]
+    assert call_kwargs["case_no"] == 101
+    assert len(call_kwargs["before_date"]) == 10  # YYYY-MM-DD
+
+
+# ---------------------------------------------------------------------------
+# 7. Mathematical Properties & Invariants Tests
+# ---------------------------------------------------------------------------
+
+def test_identical_sets_score_one_and_symmetric():
+    """Identical sets score 1.0, and score(A, B) == score(B, A) when BETA = 0.5."""
+    vec1 = [1.0, 0.0, 0.0]
+    vec2 = [0.0, 1.0, 0.0]
+
+    set_a = [
+        EntityItem(term="insomnia", embedding=vec1, ontology_code="MONDO:0008807"),
+        EntityItem(term="headache", embedding=vec2, ontology_code="MONDO:0005101"),
+    ]
+    set_b = [
+        EntityItem(term="insomnia", embedding=vec1, ontology_code="MONDO:0008807"),
+        EntityItem(term="headache", embedding=vec2, ontology_code="MONDO:0005101"),
+    ]
+
+    score_ab = set_similarity(set_a, set_b, beta=0.5)
+    score_ba = set_similarity(set_b, set_a, beta=0.5)
+
+    assert pytest.approx(score_ab, rel=1e-5) == 1.0
+    assert pytest.approx(score_ba, rel=1e-5) == 1.0
+    assert pytest.approx(score_ab, rel=1e-5) == score_ba
+
+
+def test_weak_match_cutoff_monotony():
+    """Adding symptoms whose best match is <= TAU (0.3) to a candidate never raises its score."""
+    q_vec = [1.0, 0.0, 0.0]
+    c_good_vec = [1.0, 0.0, 0.0]      # identical -> raw = 1.0, s* = 1.0
+    c_weak_vec = [0.25, 0.968, 0.0]   # cos ~ 0.25 <= TAU=0.3 -> s* = 0.0
+
+    query = [EntityItem(term="cough", embedding=q_vec)]
+    candidate_base = [EntityItem(term="cough", embedding=c_good_vec)]
+
+    # Candidate with extra weak symptom
+    candidate_with_weak = [
+        EntityItem(term="cough", embedding=c_good_vec),
+        EntityItem(term="unrelated", embedding=c_weak_vec),
+    ]
+
+    score_base = set_similarity(query, candidate_base)
+    score_with_weak = set_similarity(query, candidate_with_weak)
+
+    assert score_base is not None and score_with_weak is not None
+    # Extra symptom with s* = 0 reduces C -> Q coverage average, so score must not increase
+    assert score_with_weak <= score_base
+
+
+def test_exact_plus_unrelated_beats_weak_matches():
+    """1 identical + 1 unrelated beats 10 symptoms each at raw 0.5 for query of 2 symptoms."""
+    # Query: 2 symptoms
+    q1 = EntityItem(term="fever", embedding=[1.0, 0.0, 0.0])
+    q2 = EntityItem(term="cough", embedding=[0.0, 1.0, 0.0])
+    query = [q1, q2]
+
+    # Candidate 1: 1 identical + 1 unrelated (orthogonal)
+    c1_good = EntityItem(term="fever", embedding=[1.0, 0.0, 0.0])
+    c1_unrel = EntityItem(term="fracture", embedding=[0.0, 0.0, 1.0])
+    candidate_1 = [c1_good, c1_unrel]
+
+    # Candidate 2: 10 symptoms each with cosine = 0.5 (below 1.0, sharpened = (0.5 - 0.3) / 0.7 = 0.285)
+    # Cosine = 0.5 vector with respect to q1 and q2: [0.5, 0.5, 0.707]
+    c2_items = [
+        EntityItem(term=f"weak_symptom_{i}", embedding=[0.5, 0.5, 0.7071])
+        for i in range(10)
+    ]
+
+    score_cand1 = set_similarity(query, candidate_1, tau=0.3, alpha=1.0)
+    score_cand2 = set_similarity(query, c2_items, tau=0.3, alpha=1.0)
+
+    assert score_cand1 is not None and score_cand2 is not None
+    assert score_cand1 > score_cand2
+
+
+def test_set_deduplication():
+    """Duplicating a term in a set does not change the score."""
+    q_vec = [1.0, 0.0, 0.0]
+    query = [EntityItem(term="nausea", embedding=q_vec)]
+
+    cand_unique = [
+        EntityItem(term="nausea", embedding=q_vec),
+        EntityItem(term="vomiting", embedding=[0.0, 1.0, 0.0]),
+    ]
+    cand_duplicated = [
+        EntityItem(term="nausea", embedding=q_vec),
+        EntityItem(term="nausea", embedding=q_vec),  # Duplicate
+        EntityItem(term="vomiting", embedding=[0.0, 1.0, 0.0]),
+    ]
+
+    s_unique = set_similarity(query, cand_unique)
+    s_dup = set_similarity(query, cand_duplicated)
+
+    assert s_unique is not None
+    assert pytest.approx(s_unique, rel=1e-5) == s_dup
+
+
+def test_patient_score_bands_and_gaussian():
+    """Patient score evaluates 0.7 * bandScore + 0.3 * gaussScore."""
+    # Same age (same band, 0 diff -> band 1.0, gauss 1.0 -> 1.0)
+    assert pytest.approx(patient_similarity(30.0, 30.0), rel=1e-5) == 1.0
+
+    # 1 band apart: 20 (band 4: 18-25) vs 30 (band 5: 26-40) -> bandScore 0.7
+    score_1_apart = patient_similarity(20.0, 30.0)
+    assert 0.5 < score_1_apart < 1.0
+
+    # 2 bands apart: 20 (band 4) vs 50 (band 6: 41-60) -> bandScore 0.1
+    score_2_apart = patient_similarity(20.0, 50.0)
+    assert 0.0 < score_2_apart < score_1_apart
+
+    # Missing age returns None
+    assert patient_similarity(None, 30.0) is None
+    assert patient_similarity(30.0, None) is None
+
+
+def test_visit_type_score_exact_and_different():
+    """Visit type score is 1.0 for exact match and 0.5 for different."""
+    assert visit_type_similarity("follow-up", "follow-up") == 1.0
+    assert visit_type_similarity("follow-up", "Follow-up Visit") == 1.0
+    assert visit_type_similarity("follow-up", "new consultation") == 0.5
+    assert visit_type_similarity("new consultation", "Follow-up Visit") == 0.5
+
+
+def test_composite_score_weight_normalization():
+    """Composite score dynamically normalizes weights over available components."""
+    # When all 4 available
+    scores = {"diagnosis": 1.0, "symptoms": 0.5, "patient": 1.0, "visitType": 0.5}
+    weights = {"diagnosis": 0.4, "symptoms": 0.4, "patient": 0.1, "visitType": 0.1}
+    expected = (0.4 * 1.0 + 0.4 * 0.5 + 0.1 * 1.0 + 0.1 * 0.5) / 1.0
+    assert pytest.approx(compute_composite_score(scores, weights), rel=1e-5) == expected
+
+    # When diagnosis is missing (None), weights re-normalize over available components
+    scores_partial = {"diagnosis": None, "symptoms": 1.0, "patient": 0.5, "visitType": 1.0}
+    expected_partial = (0.4 * 1.0 + 0.1 * 0.5 + 0.1 * 1.0) / (0.4 + 0.1 + 0.1)
+    assert pytest.approx(compute_composite_score(scores_partial, weights), rel=1e-5) == expected_partial
+
+
+def test_case_service_candidate_ranking_and_filters():
+    """Verify Candidate retrieval, scoring, tie-breaking, and Top-K limit."""
+    mock_nlp = MagicMock()
+    mock_nlp.analyze.side_effect = lambda term: _make_mock_doc(term, ent_text=term, is_negated=False)
+    mock_nlp.analyze_batch.side_effect = lambda terms, **kwargs: [_make_mock_doc(t, ent_text=t, is_negated=False) for t in terms]
+    assertion_svc = ClinicalAssertionService(nlp_service=mock_nlp)
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_entities.side_effect = lambda terms: np.ones((len(terms), 768), dtype=np.float32)
+
+    case_svc = CaseService(
+        assertion_service=assertion_svc,
+        hpo_service=MagicMock(),
+        mondo_service=MagicMock(),
+        embedder=mock_embedder,
+    )
+
+    # 3 candidates in MongoDB knowledge base
+    cand1 = {
+        "caseNo": 201,
+        "visitDate": "2024-02-01",
+        "visitReason": "Follow-up Visit",
+        "medication": ["paracetamol"],
+        "patientInfo": {"age": 45.0, "gender": "m"},
+        "diagnosis": [{"term": "insomnia", "embedding": [1.0] * 768}],
+        "symptoms": [{"term": "fatigue", "embedding": [1.0] * 768}],
+    }
+    cand2 = {
+        "caseNo": 202,
+        "visitDate": "2024-01-15",
+        "visitReason": "New Consultation",
+        "medication": ["ibuprofen"],
+        "patientInfo": {"age": 12.0, "gender": "f"},
+        "diagnosis": [{"term": "asthma", "embedding": [0.0] * 768}],
+        "symptoms": [{"term": "fever", "embedding": [0.0] * 768}],
+    }
+
+    mock_mongo = MagicMock()
+    mock_mongo.find_past_cases.return_value = []
+    mock_mongo.find_similar_candidates.return_value = [cand1, cand2]
+
+    req = FindSimilarCaseRequest(
+        case=CaseInput(
+            caseNo=101,
+            visitType=VisitTypeEnum.FOLLOW_UP,
+            patientInfo=PatientInfoInput(age=45.0, gender="m"),
+            symptoms=["fatigue"],
+            diagnosis=["insomnia"],
+        ),
+        top_k=5,
+        params=SimilarityParams(
+            wDiagnosisScore=0.4,
+            wSymptomsScore=0.4,
+            wPatientScore=0.1,
+            wVisitTypeScore=0.1,
+        ),
     )
 
     res = case_svc.find_similar_cases(req, mongo_kb=mock_mongo)
+    assert len(res.similarCases) == 2
+    # Candidate 1 has exact diagnosis, symptom, age, and visitType -> highest score
+    first = res.similarCases[0]
+    second = res.similarCases[1]
+    assert first.case["caseNo"] == 201
+    assert first.finalScore > second.finalScore
+    assert first.components.visitType == 1.0
+    assert second.components.visitType == 0.5
 
-    mock_mongo.find_past_cases.assert_not_called()
-    assert res.pastCases == []
+
+def test_taxonomy_integer_lookups(tmp_path):
+    """Test integer-based TaxonomyIndex Wu-Palmer with both int codes and CURIE strings."""
+    from meldai.terminology.taxonomy import TaxonomyIndex
+
+    obo_file = tmp_path / "test.obo"
+    obo_file.write_text(
+        "[Term]\nid: HP:0000001\nname: Root\n\n"
+        "[Term]\nid: HP:0000002\nname: Level1\nis_a: HP:0000001\n\n"
+        "[Term]\nid: HP:0000003\nname: SpecificCommon\nis_a: HP:0000002\n\n"
+        "[Term]\nid: HP:0000004\nname: LeafA\nis_a: HP:0000003\n\n"
+        "[Term]\nid: HP:0000005\nname: LeafB\nis_a: HP:0000003\n\n"
+        "[Term]\nid: HP:0000006\nname: AltLeafB\nalt_id: HP:0000007\nis_a: HP:0000003\n"
+    )
+
+    tax = TaxonomyIndex(obo_file, prefix="HP", generic_depth=2)
+
+    # Identical codes -> 1.0
+    assert tax.wu_palmer(4, 4) == 1.0
+    assert tax.wu_palmer("HP:0000004", 4) == 1.0
+
+    # Common ancestor is 3 (depth 3 > generic_depth 2). Leaf depth = 4.
+    # wu_palmer(4, 5) = 2 * 3 / (4 + 4) = 6 / 8 = 0.75
+    score_int = tax.wu_palmer(4, 5)
+    score_str = tax.wu_palmer("HP:0000004", "HP:0000005")
+    assert pytest.approx(score_int, rel=1e-5) == 0.75
+    assert pytest.approx(score_str, rel=1e-5) == 0.75
+
+    # Alt ID mapping: 7 -> 6
+    score_alt = tax.wu_palmer(4, 7)
+    score_canonical = tax.wu_palmer(4, 6)
+    assert pytest.approx(score_alt, rel=1e-5) == score_canonical
+
+    # Missing term -> 0.0
+    assert tax.wu_palmer(4, 99999) == 0.0
+
+
+def test_similar_cases_patient_frequency_capping():
+    """Verify that similar case selection caps cases from any single patient to floor(k/3)."""
+    mock_nlp = MagicMock()
+    mock_nlp.analyze.side_effect = lambda term: _make_mock_doc(term, ent_text=term, is_negated=False)
+    mock_nlp.analyze_batch.side_effect = lambda terms, **kwargs: [_make_mock_doc(t, ent_text=t, is_negated=False) for t in terms]
+    assertion_svc = ClinicalAssertionService(nlp_service=mock_nlp)
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_entities.side_effect = lambda terms: np.ones((len(terms), 768), dtype=np.float32)
+
+    # 5 candidate cases for caseNo=200, 3 candidate cases for caseNo=300, 2 for caseNo=400
+    candidates = [
+        {"caseNo": 200, "visitDate": f"2024-01-0{i}", "symptoms": ["headache"], "diagnosis": ["fever"], "patientInfo": {"age": 30.0}}
+        for i in range(1, 6)
+    ] + [
+        {"caseNo": 300, "visitDate": f"2024-02-0{i}", "symptoms": ["headache"], "diagnosis": ["fever"], "patientInfo": {"age": 30.0}}
+        for i in range(1, 4)
+    ] + [
+        {"caseNo": 400, "visitDate": f"2024-03-0{i}", "symptoms": ["headache"], "diagnosis": ["fever"], "patientInfo": {"age": 30.0}}
+        for i in range(1, 3)
+    ]
+
+    mock_mongo = MagicMock()
+    mock_mongo.find_past_cases.return_value = []
+    mock_mongo.find_similar_candidates.return_value = candidates
+
+    case_svc = CaseService(
+        assertion_service=assertion_svc,
+        hpo_service=MagicMock(),
+        mondo_service=MagicMock(),
+        embedder=mock_embedder,
+    )
+
+    # Test top_k = 6 -> max_per_patient = floor(6/3) = 2
+    req = FindSimilarCaseRequest(
+        case=CaseInput(
+            caseNo=100,
+            visitType=VisitTypeEnum.FOLLOW_UP,
+            symptoms=["headache"],
+            diagnosis=["fever"],
+            patientInfo=PatientInfoInput(age=30.0),
+        ),
+        top_k=6,
+    )
+
+    res = case_svc.find_similar_cases(req, mongo_kb=mock_mongo)
+    assert len(res.similarCases) == 6
+    case_no_counts = {}
+    for item in res.similarCases:
+        c_no = item.case["caseNo"]
+        case_no_counts[c_no] = case_no_counts.get(c_no, 0) + 1
+        assert case_no_counts[c_no] <= 2
+
+    # Test top_k = 5 -> max_per_patient = floor(5/3) = 1
+    req5 = FindSimilarCaseRequest(
+        case=CaseInput(
+            caseNo=100,
+            visitType=VisitTypeEnum.FOLLOW_UP,
+            symptoms=["headache"],
+            diagnosis=["fever"],
+            patientInfo=PatientInfoInput(age=30.0),
+        ),
+        top_k=5,
+    )
+
+    res5 = case_svc.find_similar_cases(req5, mongo_kb=mock_mongo)
+    assert len(res5.similarCases) == 3  # Only 3 unique patients available (200, 300, 400)
+    case_no_counts5 = {}
+    for item in res5.similarCases:
+        c_no = item.case["caseNo"]
+        case_no_counts5[c_no] = case_no_counts5.get(c_no, 0) + 1
+        assert case_no_counts5[c_no] <= 1
+
+
+

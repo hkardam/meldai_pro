@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
+import numpy as np
 from meldai.main import create_web_app
 from meldai.nlp.medspacy_nlp import SegmentResult
 from meldai.terminology.hpo import HPOResult
@@ -323,10 +324,13 @@ def test_find_similar_cases_endpoint():
 
     with patch("meldai.api.router._get_case_service", return_value=mock_case_svc):
         payload = {
-            "caseNo": 999,
-            "patientInfo": {"age": 50, "gender": "Female"},
-            "symptoms": ["lack of sleep"],
-            "diagnosis": ["Insomia"],
+            "case": {
+                "caseNo": 999,
+                "visitType": "follow-up",
+                "patientInfo": {"age": 50, "gender": "Female"},
+                "symptoms": ["lack of sleep"],
+                "diagnosis": ["Insomia"],
+            }
         }
         resp = client.post("/api/v1/cases/find-similar", json=payload)
 
@@ -345,4 +349,104 @@ def test_find_similar_cases_endpoint():
     assert data["decoratedCase"]["diagnosis"][0]["mondoCode"] == 8807
     assert len(data["decoratedCase"]["diagnosis"][0]["embedding"]) == 768
     assert data["similarCases"] == []
+
+
+def test_biolord_embed_endpoint():
+    mock_embedder = MagicMock()
+    mock_embedder.embed_texts.return_value = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float32)
+
+    with patch("meldai.api.router.get_biolord_embedder", return_value=mock_embedder):
+        payload = {"texts": ["Etizolam, marketed as ZOLAVIL", "Escitalopram"], "normalize": True}
+        resp = client.post("/api/v1/biolord/embed", json=payload)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["dimension"] == 3
+    assert len(data["embeddings"]) == 2
+    assert data["texts"] == payload["texts"]
+
+
+def test_load_medicine_master_endpoint():
+    mock_service = MagicMock()
+    mock_service.load_and_embed_master.return_value = {
+        "status": "success",
+        "collection": "medicine_master",
+        "total_records": 349,
+        "upserted_count": 349,
+        "modified_count": 0,
+        "total_in_db": 349,
+        "batches_processed": 4,
+        "duration_seconds": 2.15,
+    }
+
+    with patch("meldai.api.router._get_medicine_master_service", return_value=mock_service):
+        payload = {"batch_size": 100, "recreate": False}
+        resp = client.post("/api/v1/medicines/load-master", json=payload)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["collection"] == "medicine_master"
+    assert data["total_records"] == 349
+    assert data["upserted_count"] == 349
+    assert data["batches_processed"] == 4
+
+
+def test_search_medicines_endpoint():
+    mock_service = MagicMock()
+    mock_service.search_similar_medicines.return_value = [
+        {
+            "brand_name": "ZOLAVIL",
+            "canonical_molecule": "Etizolam",
+            "clinical_dosing_indication": "Short-term bridge therapy for generalized anxiety.",
+            "similarity_score": 0.884,
+        }
+    ]
+
+    with patch("meldai.api.router._get_medicine_master_service", return_value=mock_service):
+        payload = {"query": "anxiety bridge therapy", "top_k": 5, "min_score": 0.4}
+        resp = client.post("/api/v1/medicines/search", json=payload)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["query"] == "anxiety bridge therapy"
+    assert data["total_matches"] == 1
+    assert data["matches"][0]["brand_name"] == "ZOLAVIL"
+    assert data["matches"][0]["similarity_score"] == 0.884
+
+
+def test_generate_medication_search_queries_endpoint():
+    mock_gemini = MagicMock()
+    mock_gemini.generate_medication_search_queries.return_value = {
+        "vector_semantic_queries": [
+            "Pharmacotherapy for OCD with severe intrusive thoughts and anxiety."
+        ],
+        "bm25_keywords": [
+            "SSRI",
+            "OCD",
+            "Obsessive Compulsive Disorder",
+            "Anxiety"
+        ],
+    }
+
+    with patch("meldai.api.router.get_gemini_service", return_value=mock_gemini):
+        payload = {
+            "symptoms": [
+                "Repetitive washing and cleaning",
+                "Intrusive thoughts of dirt"
+            ],
+            "diagnosis": [
+                "OCD"
+            ]
+        }
+        resp = client.post("/api/v1/cases/medication-search-queries", json=payload)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "vector_semantic_queries" in data
+    assert "bm25_keywords" in data
+    assert len(data["vector_semantic_queries"]) == 1
+    assert "OCD" in data["vector_semantic_queries"][0]
+    assert "SSRI" in data["bm25_keywords"]
+
 

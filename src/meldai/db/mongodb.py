@@ -39,7 +39,8 @@ class ClinicalEntityItem(BaseModel):
 
 class DiagnosisItem(BaseModel):
     """Diagnosis entity item patched into MongoDB case documents."""
-    term: str = Field(..., description="Diagnosis surface form from database")
+    term: str = Field(..., description="Original diagnosis surface form from database")
+    mondoTerm: Optional[str] = Field(default=None, description="Matched MONDO concept label")
     mondoCode: Optional[int] = Field(default=None, description="Numeric MONDO ontology code")
     embedding: List[float] = Field(default_factory=list, description="768-dimensional SapBERT embedding vector")
 
@@ -101,12 +102,80 @@ class MongoKnowledgeBase:
         """Collection storing medical cases."""
         return self.db["cases"]
 
+    @property
+    def medicine_master(self) -> Collection:
+        """Collection storing medicine master records with BioLORD vector embeddings."""
+        return self.db["medicine_master"]
+
     def setup_indexes(self) -> None:
         """Initialize indexes for fast lookups and uniqueness."""
         self.cases.create_index([("id", ASCENDING)], unique=True)
         self.setup_patient_visits_index()
         self.cases.create_index([("patient.name", ASCENDING)])
+        self.setup_medicine_master_indexes()
         logger.info("MongoDB 'cases' indexes verified.")
+
+    def setup_medicine_master_indexes(self) -> None:
+        """Initialize indexes on medicine_master collection.
+
+        - Text search index on: brand_name, canonical_molecule, clinical_dosing_indication.
+        - Atlas vector search index on: embedding (768-d cosine).
+        - Direct lookups on: brand_name, canonical_molecule.
+        """
+        # 1. Full-text search index on brand_name, canonical_molecule, clinical_dosing_indication
+        try:
+            self.medicine_master.create_index(
+                [
+                    ("brand_name", "text"),
+                    ("canonical_molecule", "text"),
+                    ("clinical_dosing_indication", "text"),
+                ],
+                name="medicine_master_text_idx",
+                weights={
+                    "brand_name": 10,
+                    "canonical_molecule": 10,
+                    "clinical_dosing_indication": 5,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Medicine master text index initialization notice: %s", exc)
+
+        # 2. Identity and lookup indexes
+        self.medicine_master.create_index([("brand_name", ASCENDING)])
+        self.medicine_master.create_index([("canonical_molecule", ASCENDING)])
+        self.medicine_master.create_index(
+            [("brand_name", ASCENDING), ("canonical_molecule", ASCENDING), ("dosage_group_id", ASCENDING)],
+            unique=True,
+            name="uniq_brand_molecule_dosage",
+        )
+
+        # 3. Vector search index on 'embedding' field (if running on MongoDB Atlas)
+        try:
+            from pymongo.operations import SearchIndexModel
+            existing_search_indexes = list(self.medicine_master.list_search_indexes())
+            has_vector_idx = any(idx.get("name") == "vector_index" for idx in existing_search_indexes)
+            if not has_vector_idx:
+                vector_model = SearchIndexModel(
+                    definition={
+                        "fields": [
+                            {
+                                "type": "vector",
+                                "path": "embedding",
+                                "numDimensions": 768,
+                                "similarity": "cosine",
+                            }
+                        ]
+                    },
+                    name="vector_index",
+                    type="vectorSearch",
+                )
+                self.medicine_master.create_search_index(model=vector_model)
+                logger.info("MongoDB Atlas vectorSearch index registered on 'embedding'.")
+        except Exception:
+            # Expected on local standalone MongoDB Community where cosine similarity ranking is computed in-memory
+            pass
+
+        logger.info("MongoDB 'medicine_master' indexes verified.")
 
     def setup_patient_visits_index(self) -> None:
         """Initialize unique compound index on (caseNo, visitDate)."""
@@ -372,6 +441,93 @@ class MongoKnowledgeBase:
             "modified_count": result.modified_count,
             "matched_count": result.matched_count,
         }
+
+    def find_similar_candidates(
+        self,
+        exclude_case_no: Optional[int] = None,
+        required_visit_type: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        """Fetch candidate medical cases for similarity matching.
+
+        Enforces candidate filters:
+          - Non-empty medication array: {"$or": [{"medication.0": {"$exists": True}}, {"medications.0": {"$exists": True}}]}
+          - Non-empty diagnosis array: {"diagnosis.0": {"$exists": True}}
+          - Self-exclusion: caseNo != case.caseNo (caseNo serves as patient identifier)
+          - Optional sameVisitTypeOnly filter
+        """
+        import re
+
+        and_clauses: List[Dict[str, Any]] = [
+            {"$or": [{"medication.0": {"$exists": True}}, {"medications.0": {"$exists": True}}]},
+            {"diagnosis.0": {"$exists": True}},
+        ]
+
+        if exclude_case_no is not None:
+            and_clauses.append({"caseNo": {"$ne": exclude_case_no}})
+
+        if required_visit_type:
+            and_clauses.append({
+                "visitReason": {"$regex": re.escape(required_visit_type), "$options": "i"}
+            })
+
+        query = {"$and": and_clauses}
+        cursor = self.cases.find(query, {"_id": 0}).limit(limit)
+        return list(cursor)
+
+    def upsert_medicine_master_batch(
+        self, records: List[Dict[str, Any]], ordered: bool = False
+    ) -> Dict[str, int]:
+        """
+        Bulk upsert medicine master documents into MongoDB.
+        Uses compound key (brand_name, canonical_molecule, dosage_group_id) to avoid duplicates.
+        Attaches/updates document fields including root 'embedding'.
+        """
+        if not records:
+            return {"upserted_count": 0, "modified_count": 0, "matched_count": 0}
+
+        operations = []
+        for rec in records:
+            brand_name = rec.get("brand_name")
+            canonical_molecule = rec.get("canonical_molecule")
+            dosage_group_id = rec.get("dosage_group_id")
+
+            filter_query: Dict[str, Any] = {
+                "brand_name": brand_name,
+                "canonical_molecule": canonical_molecule,
+            }
+            if dosage_group_id is not None:
+                filter_query["dosage_group_id"] = dosage_group_id
+
+            operations.append(
+                UpdateOne(
+                    filter_query,
+                    {"$set": rec},
+                    upsert=True,
+                )
+            )
+
+        result = self.medicine_master.bulk_write(operations, ordered=ordered)
+        logger.debug(
+            "Upserted medicine master batch: upserted=%d, modified=%d, matched=%d",
+            len(result.upserted_ids),
+            result.modified_count,
+            result.matched_count,
+        )
+        return {
+            "upserted_count": len(result.upserted_ids),
+            "modified_count": result.modified_count,
+            "matched_count": result.matched_count,
+        }
+
+    def clear_medicine_master(self) -> int:
+        """Drop all documents in medicine_master collection."""
+        res = self.medicine_master.delete_many({})
+        return res.deleted_count
+
+    def get_medicine_master_count(self) -> int:
+        """Return total document count in medicine_master collection."""
+        return self.medicine_master.count_documents({})
 
     def close(self) -> None:
         """Close MongoDB connection pool."""

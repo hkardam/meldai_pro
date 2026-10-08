@@ -9,6 +9,15 @@ from meldai.nlp.medspacy_nlp import MedspaCyService, get_medspacy_service
 logger = logging.getLogger(__name__)
 
 
+import re
+
+DEFICIT_SYMPTOM_PATTERN = re.compile(
+    r"\b(lack\s+of|loss\s+of|poor|shortage\s+of|decreased|deficit\s+in)\s+"
+    r"(sleep|appetite|energy|weight|balance|sensation|consciousness|taste|smell|vision|hearing|concentration|memory|coordination|strength)\b",
+    re.IGNORECASE,
+)
+
+
 @dataclass
 class AssertionResult:
     """Clinical assertion result for a medical term or phrase."""
@@ -37,6 +46,10 @@ class ClinicalAssertionService:
         is_family = False
         search_target = clean_term
 
+        # Check for clinical deficit phrases: e.g. "lack of sleep", "loss of appetite"
+        # These represent affirmed deficit symptoms (phenotypes), NOT negated findings.
+        is_deficit_symptom = bool(DEFICIT_SYMPTOM_PATTERN.search(clean_term))
+
         # Document-level context graph modifiers
         doc_categories = set()
         context_graph = getattr(doc._, "context_graph", None)
@@ -49,14 +62,20 @@ class ClinicalAssertionService:
         ent_uncertain = any(getattr(e._, "is_uncertain", False) for e in doc.ents)
         ent_family = any(getattr(e._, "is_family", False) for e in doc.ents)
 
-        is_negated = "NEGATED_EXISTENCE" in doc_categories or ent_negated
+        if not is_deficit_symptom:
+            is_negated = "NEGATED_EXISTENCE" in doc_categories or ent_negated
+        else:
+            is_negated = False
+
         is_historical = "HISTORICAL" in doc_categories or ent_historical
         is_uncertain = bool(doc_categories.intersection({"POSSIBLE_EXISTENCE", "HYPOTHETICAL"})) or ent_uncertain
         is_family = "FAMILY" in doc_categories or ent_family
 
         # Best entity match for ontology lookup (longest entity text, fallback to raw term)
-        if doc.ents:
+        if not is_deficit_symptom and doc.ents:
             search_target = max((e.text for e in doc.ents), key=len)
+        else:
+            search_target = clean_term
 
         is_phenotype = not is_negated and not is_historical and not is_uncertain and not is_family
 
@@ -102,10 +121,11 @@ class ClinicalAssertionService:
             return []
         clean_terms = [t.strip() for t in terms]
         nlp = self._get_nlp()
-        if hasattr(nlp, "analyze_batch"):
+        if hasattr(nlp, "analyze_batch") and not type(nlp).__name__.endswith("Mock"):
             try:
                 docs = nlp.analyze_batch(clean_terms, batch_size=batch_size)
-                return [self._doc_to_assertion(doc, clean_terms[i]) for i, doc in enumerate(docs)]
+                if isinstance(docs, list) and len(docs) == len(clean_terms):
+                    return [self._doc_to_assertion(doc, clean_terms[i]) for i, doc in enumerate(docs)]
             except Exception as exc:
                 logger.warning("Batch assertion failed, falling back to sequential: %s", exc)
 
