@@ -49,6 +49,7 @@ from meldai.services.chief_complaints_runner import get_chief_complaints_runner
 from meldai.services.gemini_service import get_gemini_service
 from meldai.services.medicine_master_service import MedicineMasterService
 from meldai.services.migration_service import MigrationService
+from meldai.services.postgres_prescription_service import PostgresPrescriptionService
 from meldai.services.prescription_service import PrescriptionService
 from meldai.services.symptom_service import SymptomService
 from meldai.services.terminology_service import TerminologySearchService
@@ -137,6 +138,18 @@ def _get_prescription_service() -> PrescriptionService:
         mongo_kb=mongo,
         gemini_service=gemini,
     )
+
+
+def _get_postgres_prescription_service() -> PostgresPrescriptionService:
+    settings = get_settings()
+    case_svc = _get_case_service()
+    pg = PostgresSource(settings)
+    return PostgresPrescriptionService(
+        settings=settings,
+        case_service=case_svc,
+        postgres_source=pg,
+    )
+
 
 
 def _get_medicine_master_service() -> MedicineMasterService:
@@ -472,11 +485,13 @@ def find_similar_cases(
 def prescribe_medications(
     payload: PrescribeMedicationsRequest,
 ) -> PrescribeMedicationsResponse:
-    """Enrich case with HPO/MONDO codes, retrieve past encounters and similar cases with prior medications,
-    and generate medication prescription recommendations using Gemini LLM."""
+    """Enrich case with HPO/MONDO codes, retrieve past encounters and similar cases from PostgreSQL,
+    and construct clinical prompt."""
     try:
-        prescription_svc = _get_prescription_service()
+        prescription_svc = _get_postgres_prescription_service()
         return prescription_svc.prescribe_medications(payload)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Prescribe medications failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Prescribe medications failed: {str(exc)}") from exc

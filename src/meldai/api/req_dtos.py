@@ -5,6 +5,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, model_validator
 
 
+
 class EmbedRequest(BaseModel):
     terms: List[str]
 

@@ -1,7 +1,8 @@
 """FastAPI response DTO schemas."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field
+
 
 
 class EmbedResponse(BaseModel):
@@ -143,6 +144,8 @@ class DecoratedPatientInfo(BaseModel):
 
 class DecoratedCase(BaseModel):
     caseNo: Optional[int] = Field(default=None, description="Case number / patient ID or null")
+
+
     visitType: Optional[str] = Field(default=None, description="Visit type")
     patientInfo: DecoratedPatientInfo = Field(default_factory=DecoratedPatientInfo)
     symptoms: List[DecoratedSymptomItem] = Field(default_factory=list)
@@ -173,6 +176,8 @@ class PrescribeMedicationsResponse(BaseModel):
     explanation: str = Field(..., description="Clinical reasoning and explanation adapting to doctor's prescription style and patient history")
     pastCasesCount: int = Field(default=0, description="Number of prior visits used in context")
     similarCasesCount: int = Field(default=0, description="Number of similar cases used in context")
+    prompt: Optional[str] = Field(default=None, description="Constructed clinical prompt passed to LLM")
+
 
 
 class LoadMedicineMasterResponse(BaseModel):

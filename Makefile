@@ -34,14 +34,11 @@ logs:
 logs-engine:
 	docker compose logs -f app
 
-logs-ui:
-	docker compose logs -f frontend
-
 bash:
 	docker compose run --rm --service-ports app bash
 
 debug:
-	WAIT_FOR_DEBUGGER=true docker compose run --rm --service-ports app python -m meldai.main run-demo
+	DEBUG_PORT=5679 WAIT_FOR_DEBUGGER=true docker compose run --rm --service-ports app python -m meldai.main serve --host 0.0.0.0 --port 8000
 
 run-pipeline:
 	docker compose run --rm app python -m meldai.main run-demo
