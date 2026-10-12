@@ -41,3 +41,4 @@ cache/
 .cache/
 hf_models/
 logs/
+tmp/

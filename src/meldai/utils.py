@@ -1,5 +1,6 @@
-"""Utility methods for MeldAI medical text processing and symptom parsing."""
+from __future__ import annotations
 
+from typing import Any
 import unicodedata
 
 KEEP = set("%+/?-().,:;")  # clinically meaningful: 60%, ++, ?GTCS, D/d, etc.
@@ -61,4 +62,105 @@ def to_curie(prefix: str, identifier: str | int | None) -> str | None:
         formatted_digits = digits
 
     return f"{canonical_prefix}:{formatted_digits}"
+
+
+def generate_run_id(case_no: str | int | None = None) -> str:
+    """Generate a unique run ID for prompt/response tracing.
+
+    Format: case_<case_no>_<YYYYMMDD_HHMMSS>_<short_uuid> or run_<YYYYMMDD_HHMMSS>_<short_uuid>.
+    """
+    import uuid
+    from datetime import datetime
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    short_uuid = uuid.uuid4().hex[:6]
+    if case_no is not None:
+        return f"case_{case_no}_{ts}_{short_uuid}"
+    return f"run_{ts}_{short_uuid}"
+
+
+def save_prompt_to_tmp(
+    prompt: str,
+    run_id: str | None = None,
+    case_no: str | int | None = None,
+    directory: str | None = None,
+) -> str:
+    """Save the executed prompt to <id>_prompt.txt in a tmp directory.
+
+    Args:
+        prompt: Full prompt string.
+        run_id: Unique run ID (if None, generated via generate_run_id).
+        case_no: Optional case number identifier.
+        directory: Optional directory path (defaults to repo_root / 'tmp').
+
+    Returns:
+        Absolute string path to the saved prompt file.
+    """
+    import logging
+    from pathlib import Path
+
+    logger = logging.getLogger(__name__)
+
+    if directory is not None:
+        target_dir = Path(directory)
+    else:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        target_dir = repo_root / "tmp"
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    rid = run_id or generate_run_id(case_no=case_no)
+    filename = f"{rid}_prompt.txt"
+    file_path = target_dir / filename
+
+    text_to_save = prompt if isinstance(prompt, str) else str(prompt or "")
+    try:
+        file_path.write_text(text_to_save, encoding="utf-8")
+        logger.info("Saved executed prompt (%d chars) to %s", len(text_to_save), file_path)
+    except Exception as exc:
+        logger.warning("Failed to save prompt to %s: %s", file_path, exc)
+
+    return str(file_path)
+
+
+def save_response_to_tmp(
+    response_text: str | Any,
+    run_id: str,
+    directory: str | None = None,
+) -> str:
+    """Save the raw LLM response to <id>_response.txt in a tmp directory.
+
+    Args:
+        response_text: Full raw response string or payload returned by LLM.
+        run_id: Unique run ID matching the prompt file.
+        directory: Optional directory path (defaults to repo_root / 'tmp').
+
+    Returns:
+        Absolute string path to the saved response file.
+    """
+    import logging
+    from pathlib import Path
+
+    logger = logging.getLogger(__name__)
+
+    if directory is not None:
+        target_dir = Path(directory)
+    else:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        target_dir = repo_root / "tmp"
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{run_id}_response.txt"
+    file_path = target_dir / filename
+
+    text_to_save = response_text if isinstance(response_text, str) else str(response_text or "")
+    try:
+        file_path.write_text(text_to_save, encoding="utf-8")
+        logger.info("Saved raw LLM response (%d chars) to %s", len(text_to_save), file_path)
+    except Exception as exc:
+        logger.warning("Failed to save response to %s: %s", file_path, exc)
+
+    return str(file_path)
+
 

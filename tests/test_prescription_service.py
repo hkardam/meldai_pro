@@ -30,7 +30,7 @@ from meldai.services.prescription_service import PrescriptionService
 
 def test_gemini_service_mock_when_not_configured():
     """GeminiService produces deterministic mock response when no API key is provided."""
-    service = GeminiService(api_key=None)
+    service = GeminiService(settings=MagicMock(gemini_api_key=""), api_key="")
     assert not service.is_configured
 
     result = service.generate_prescription("Patient has severe insomnia and fatigue.")
@@ -52,7 +52,11 @@ def test_gemini_service_parses_json_with_markdown_fence():
         '}\n'
         '```'
     )
-    with patch.object(service, "generate_content", return_value=markdown_json):
+    with patch.object(
+        service,
+        "generate_content_with_metadata",
+        return_value=(markdown_json, {"response_time_seconds": 0.1, "tokens_used": {}, "cost_usd": 0.0}),
+    ):
         res = service.generate_prescription("sample prompt")
         assert res["medications"] == ["Amoxicillin 500mg", "Paracetamol 650mg"]
         assert "antimicrobial regimen" in res["explanation"]
@@ -252,7 +256,7 @@ def test_prescribe_medications_endpoint():
         similarCasesCount=2,
     )
 
-    with patch("meldai.api.router._get_prescription_service", return_value=mock_presc_svc):
+    with patch("meldai.api.router._get_postgres_prescription_service", return_value=mock_presc_svc):
         payload = {
             "case": {
                 "caseNo": 1234,
@@ -294,3 +298,96 @@ def test_prescription_service_reads_active_prompt_file():
     assert "psychiatrist practicing in India" in prompt
     assert "<data>" in prompt
     assert "</data>" in prompt
+
+
+def test_prepare_prompt_output_format_constraint_full_medication_master():
+    """Verify that both PrescriptionService and PostgresPrescriptionService require full medication master item in output format."""
+    from meldai.services.prescription_service import PrescriptionService
+    from meldai.services.postgres_prescription_service import PostgresPrescriptionService
+
+    decorated_case = DecoratedCase(
+        caseNo=888,
+        visitType="follow-up",
+        patientInfo=DecoratedPatientInfo(age=28.0, gender="Male"),
+        symptoms=[],
+        diagnosis=[],
+    )
+
+    mongo_svc = PrescriptionService()
+    mongo_prompt = mongo_svc.prepare_prompt(decorated_case=decorated_case, past_cases=[], similar_cases=[])
+    assert '"brand_name": "Exact brand_name from local medicine master"' in mongo_prompt
+    assert '"canonical_molecule": "Exact canonical_molecule from local medicine master"' in mongo_prompt
+    assert '"clinical_dosing_indication": "Exact clinical_dosing_indication from local medicine master"' in mongo_prompt
+    assert "CRITICAL: 'medications' must return a list of full objects of each medication master item" in mongo_prompt
+
+    pg_svc = PostgresPrescriptionService(postgres_source=MagicMock(), case_service=MagicMock())
+    pg_prompt = pg_svc.prepare_prompt(decorated_case=decorated_case, past_cases=[], similar_cases=[])
+    assert '"brand_name": "Exact brand_name from local medicine master"' in pg_prompt
+    assert '"canonical_molecule": "Exact canonical_molecule from local medicine master"' in pg_prompt
+    assert '"clinical_dosing_indication": "Exact clinical_dosing_indication from local medicine master"' in pg_prompt
+    assert "CRITICAL: 'medications' must return a list of full objects of each medication master item" in pg_prompt
+
+
+def test_prescribe_medications_handles_full_medication_master_objects():
+    """Verify that full medication master objects in LLM response are properly returned in PrescribeMedicationsResponse."""
+    mock_case_svc = MagicMock()
+    mock_gemini = MagicMock()
+
+    med_item = {
+        "brand_name": "ZOLAVIL",
+        "canonical_molecule": "Etizolam",
+        "is_fdc": False,
+        "constituent_strengths_mg": {"Etizolam": 0.5},
+        "modal_strength_mg": 0.5,
+        "release_form": "Regular",
+        "dosage_tier": "STANDARD_MAINTENANCE",
+        "dosage_group_id": "GRP_ETIZOLAM_STANDARD",
+        "clinical_dosing_indication": "Short-term bridge therapy for generalized anxiety and associated insomnia.",
+    }
+
+    mock_gemini.generate_prescription.return_value = {
+        "medications": [med_item],
+        "explanation": "Matched from local medicine master.",
+        "response_time_seconds": 1.2,
+        "tokens_used": {"total_tokens": 150},
+        "cost_usd": 0.0005,
+        "raw_response": '{"medications": [...]}',
+    }
+
+    dummy_decorated = DecoratedCase(
+        caseNo=50,
+        visitType="follow-up",
+        patientInfo=DecoratedPatientInfo(age=35.0, gender="Female"),
+        symptoms=[],
+        diagnosis=[],
+    )
+    mock_case_svc.find_similar_cases.return_value = FindSimilarCaseResponse(
+        decoratedCase=dummy_decorated,
+        pastCases=[],
+        similarCases=[],
+    )
+
+    presc_service = PrescriptionService(
+        case_service=mock_case_svc,
+        gemini_service=mock_gemini,
+        mongo_kb=MagicMock(),
+    )
+
+    req = PrescribeMedicationsRequest(
+        case=CaseInput(
+            caseNo=50,
+            visitType=VisitTypeEnum.FOLLOW_UP,
+            patientInfo=PatientInfoInput(age=35.0, gender="Female"),
+            symptoms=["anxiety"],
+            diagnosis=["Generalized anxiety disorder"],
+        ),
+        top_k=3,
+    )
+
+    res = presc_service.prescribe_medications(req)
+    assert len(res.medications) == 1
+    assert isinstance(res.medications[0], dict)
+    assert res.medications[0]["brand_name"] == "ZOLAVIL"
+    assert res.medications[0]["canonical_molecule"] == "Etizolam"
+    assert res.medications[0]["clinical_dosing_indication"] == "Short-term bridge therapy for generalized anxiety and associated insomnia."
+

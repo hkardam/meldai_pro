@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from google import genai
@@ -53,20 +54,49 @@ class GeminiService:
             self._client = genai.Client(api_key=self._api_key)
         return self._client
 
-    def generate_content(
+    def _calculate_cost(self, prompt_tokens: int, candidates_tokens: int) -> float:
+        """Calculate estimated cost in USD based on model pricing."""
+        m = (self._model_name or "").lower()
+        if "pro" in m:
+            input_rate = 1.25 / 1_000_000.0
+            output_rate = 5.00 / 1_000_000.0
+        else:  # flash or default
+            input_rate = 0.075 / 1_000_000.0
+            output_rate = 0.30 / 1_000_000.0
+
+        cost = (prompt_tokens * input_rate) + (candidates_tokens * output_rate)
+        return round(cost, 6)
+
+    def generate_content_with_metadata(
         self,
         prompt: str,
         temperature: float | None = None,
-    ) -> str:
-        """Call Google Gemini API using google-genai SDK and return the generated text."""
+    ) -> tuple[str, dict[str, Any]]:
+        """Call Google Gemini API using google-genai SDK and return (generated_text, metrics)."""
+        start_time = time.perf_counter()
+
         if not self.is_configured:
             logger.warning("Gemini API key is not configured. Generating offline mock response.")
-            return self._mock_generation(prompt)
+            raw_text = self._mock_generation(prompt)
+            elapsed = round(time.perf_counter() - start_time, 4)
+            p_toks = max(len(prompt.split()) * 4 // 3, 10)
+            c_toks = max(len(raw_text.split()) * 4 // 3, 10)
+            t_toks = p_toks + c_toks
+            cost = self._calculate_cost(p_toks, c_toks)
+            metrics = {
+                "response_time_seconds": elapsed,
+                "tokens_used": {
+                    "prompt_tokens": p_toks,
+                    "candidates_tokens": c_toks,
+                    "total_tokens": t_toks,
+                },
+                "cost_usd": cost,
+            }
+            return raw_text, metrics
 
         config = types.GenerateContentConfig(
             temperature=temperature if temperature is not None else self._temperature,
             response_mime_type="application/json",
-            tools=[{"google_search": {}}]
         )
 
         try:
@@ -75,19 +105,72 @@ class GeminiService:
                 contents=prompt,
                 config=config,
             )
-            return response.text or ""
+            elapsed = round(time.perf_counter() - start_time, 4)
+            raw_text = response.text or ""
+
+            usage = getattr(response, "usage_metadata", None)
+            p_toks = (getattr(usage, "prompt_token_count", 0) or 0) if usage else 0
+            c_toks = (getattr(usage, "candidates_token_count", 0) or 0) if usage else 0
+            t_toks = (getattr(usage, "total_token_count", 0) or 0) if usage else (p_toks + c_toks)
+            if t_toks == 0 and (p_toks + c_toks) > 0:
+                t_toks = p_toks + c_toks
+
+            cost = self._calculate_cost(p_toks, c_toks)
+
+            metrics = {
+                "response_time_seconds": elapsed,
+                "tokens_used": {
+                    "prompt_tokens": p_toks,
+                    "candidates_tokens": c_toks,
+                    "total_tokens": t_toks,
+                },
+                "cost_usd": cost,
+            }
+            return raw_text, metrics
         except Exception as exc:
             logger.error("Gemini API request error via google-genai: %s", exc)
             raise
+
+    def generate_content(
+        self,
+        prompt: str,
+        temperature: float | None = None,
+    ) -> str:
+        """Call Google Gemini API using google-genai SDK and return the generated text."""
+        raw_text, _ = self.generate_content_with_metadata(prompt=prompt, temperature=temperature)
+        return raw_text
 
     def generate_prescription(
         self,
         prompt: str,
         temperature: float | None = None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
-        """Generate structured prescription recommendations."""
-        raw_text = self.generate_content(prompt=prompt, temperature=temperature)
-        return self._parse_json_response(raw_text)
+        """Generate structured prescription recommendations with latency, token usage, and cost."""
+        try:
+            raw_text, metrics = self.generate_content_with_metadata(prompt=prompt, temperature=temperature)
+        except Exception as exc:
+            if run_id:
+                try:
+                    from meldai.utils import save_response_to_tmp
+                    save_response_to_tmp(f"ERROR: {exc}", run_id=run_id)
+                except Exception:
+                    pass
+            raise
+
+        if run_id:
+            try:
+                from meldai.utils import save_response_to_tmp
+                save_response_to_tmp(raw_text, run_id=run_id)
+            except Exception as exc:
+                logger.warning("Failed to save response to tmp: %s", exc)
+
+        parsed = self._parse_json_response(raw_text)
+        parsed["raw_response"] = raw_text
+        parsed["response_time_seconds"] = metrics["response_time_seconds"]
+        parsed["tokens_used"] = metrics["tokens_used"]
+        parsed["cost_usd"] = metrics["cost_usd"]
+        return parsed
 
     def generate_medication_search_queries(
         self,
@@ -123,39 +206,85 @@ class GeminiService:
     def _parse_json_response(self, text: str) -> dict[str, Any]:
         """Safely extract and parse JSON object from Gemini output text."""
         cleaned = text.strip()
-        # Remove markdown codeblocks if present
-        if cleaned.startswith("```json"):
-            cleaned = cleaned[7:]
-        elif cleaned.startswith("```"):
-            cleaned = cleaned[3:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-        cleaned = cleaned.strip()
+        json_codeblock_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
+        candidate = json_codeblock_match.group(1).strip() if json_codeblock_match else cleaned
+        if candidate.startswith("```json"):
+            candidate = candidate[7:]
+        elif candidate.startswith("```"):
+            candidate = candidate[3:]
+        if candidate.endswith("```"):
+            candidate = candidate[:-3]
+        candidate = candidate.strip()
 
+        data = None
         try:
-            data = json.loads(cleaned)
-            if isinstance(data, dict):
-                meds = data.get("medications", [])
-                if isinstance(meds, str):
-                    meds = [meds]
-                elif not isinstance(meds, list):
-                    meds = []
-                explanation = str(data.get("explanation", "")).strip()
-                return {
-                    "medications": meds,
-                    "explanation": explanation,
-                }
-        except Exception as exc:
-            logger.warning("JSON decode failed for Gemini response (%s). Attempting regex extraction.", exc)
+            data = json.loads(candidate)
+        except Exception:
+            outer_match = re.search(r"(\{[\s\S]*\})", candidate)
+            if outer_match:
+                try:
+                    data = json.loads(outer_match.group(1).strip())
+                except Exception:
+                    data = None
+
+        if isinstance(data, dict):
+            meds = data.get("medications", [])
+            if not meds and "recommended_medications" in data:
+                raw_recs = data.get("recommended_medications")
+                if isinstance(raw_recs, list):
+                    meds = [
+                        m.get("medication_master_item") or m.get("medication") or m
+                        if (isinstance(m, dict) and (m.get("medication_master_item") or m.get("medication") or len(m) > 2))
+                        else (m.get("brand_name", "") if isinstance(m, dict) else str(m))
+                        for m in raw_recs
+                    ]
+                    meds = [
+                        m if isinstance(m, dict)
+                        else m.strip()
+                        for m in meds
+                        if (isinstance(m, dict) or (isinstance(m, str) and m.strip()))
+                    ]
+            elif isinstance(meds, str):
+                meds = [meds]
+            elif not isinstance(meds, list):
+                meds = []
+            explanation = str(data.get("explanation", "")).strip()
+            return {
+                "medications": meds,
+                "explanation": explanation,
+            }
+
+        if isinstance(data, list):
+            meds = [
+                m if (isinstance(m, dict) and len(m) > 1)
+                else (m.get("brand_name", "") if isinstance(m, dict) else str(m))
+                for m in data
+            ]
+            meds = [
+                m if isinstance(m, dict)
+                else m.strip()
+                for m in meds
+                if (isinstance(m, dict) or (isinstance(m, str) and m.strip()))
+            ]
+            return {
+                "medications": meds,
+                "explanation": "",
+            }
+
+        logger.warning("JSON decode failed for Gemini response. Attempting regex extraction.")
 
         # Fallback regex extraction if raw JSON parsing fails
-        meds_match = re.search(r'"medications"\s*:\s*\[(.*?)\]', cleaned, re.DOTALL)
         meds_list: list[str] = []
-        if meds_match:
-            meds_list = [m.strip().strip('"').strip("'") for m in meds_match.group(1).split(",") if m.strip()]
+        brand_matches = re.findall(r'"brand_name"\s*:\s*"([^"]+)"', text)
+        if brand_matches:
+            meds_list = [b.strip() for b in brand_matches if b.strip()]
+        else:
+            meds_match = re.search(r'"medications"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+            if meds_match:
+                meds_list = [m.strip().strip('"').strip("'") for m in meds_match.group(1).split(",") if m.strip()]
 
-        expl_match = re.search(r'"explanation"\s*:\s*"(.*?)"', cleaned, re.DOTALL)
-        explanation_str = expl_match.group(1) if expl_match else cleaned
+        expl_match = re.search(r'"explanation"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', text, re.DOTALL)
+        explanation_str = expl_match.group(1) if expl_match else text.strip()
 
         return {
             "medications": meds_list,

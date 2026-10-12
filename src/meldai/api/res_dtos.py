@@ -172,11 +172,15 @@ class FindSimilarCaseResponse(BaseModel):
 
 
 class PrescribeMedicationsResponse(BaseModel):
-    medications: List[str] = Field(default_factory=list, description="Recommended prescription medication names")
+    medications: List[Union[Dict[str, Any], str]] = Field(default_factory=list, description="Recommended prescription medication master objects or names")
     explanation: str = Field(..., description="Clinical reasoning and explanation adapting to doctor's prescription style and patient history")
     pastCasesCount: int = Field(default=0, description="Number of prior visits used in context")
     similarCasesCount: int = Field(default=0, description="Number of similar cases used in context")
-    prompt: Optional[str] = Field(default=None, description="Constructed clinical prompt passed to LLM")
+    responseTimeSeconds: Optional[float] = Field(default=None, description="LLM inference response time in seconds")
+    tokensUsed: Optional[Dict[str, int]] = Field(default=None, description="Tokens used breakdown (prompt_tokens, candidates_tokens, total_tokens)")
+    totalTokens: Optional[int] = Field(default=None, description="Total tokens used by LLM call")
+    costUsd: Optional[float] = Field(default=None, description="Estimated inference cost in USD")
+    runId: Optional[str] = Field(default=None, description="Run ID identifier for prompt/response files in tmp/")
 
 
 
@@ -206,4 +210,24 @@ class MedicineSearchResponse(BaseModel):
 class MedicationSearchQueryResponse(BaseModel):
     vector_semantic_queries: List[str] = Field(default_factory=list, description="Vector search queries matching clinical_dosing_indication")
     bm25_keywords: List[str] = Field(default_factory=list, description="BM25 search keywords across brand names, molecules, and drug classes")
+
+
+class PrescribePipelineActionResponse(BaseModel):
+    status: str = Field(..., description="Action outcome: started | stopping | conflict | idle | completed | failed | stopped")
+    message: str = Field(..., description="Human-readable description of the action outcome")
+    run_id: Optional[str] = Field(default=None, description="Unique run identifier; present when pipeline is started")
+    result_file: Optional[str] = Field(default=None, description="Absolute path to the incremental JSON results file in tmp/")
+
+
+class PrescribePipelineStatusResponse(BaseModel):
+    status: str = Field(..., description="Pipeline execution state: idle | running | stopping | completed | failed | stopped")
+    run_id: Optional[str] = Field(default=None, description="Run identifier for the active or last run")
+    total_cases: int = Field(default=0, description="Total number of cases loaded from the cases file")
+    processed_cases: int = Field(default=0, description="Number of cases processed so far")
+    passed_cases: int = Field(default=0, description="Cases that completed without error")
+    failed_cases: int = Field(default=0, description="Cases that raised an exception")
+    current_case_no: Optional[int] = Field(default=None, description="Case number currently being processed")
+    result_file: Optional[str] = Field(default=None, description="Path to the incremental JSON results file")
+    elapsed_seconds: float = Field(default=0.0, description="Wall-clock seconds since the pipeline started")
+    error: Optional[str] = Field(default=None, description="Top-level fatal error message if status is 'failed'")
 

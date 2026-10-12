@@ -1,6 +1,7 @@
 """PostgreSQL-driven prescription service for case enrichment, similarity retrieval, and prompt generation."""
 
 from datetime import datetime
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -11,8 +12,9 @@ from meldai.api.req_dtos import PrescribeMedicationsRequest
 from meldai.api.res_dtos import DecoratedCase, PrescribeMedicationsResponse
 from meldai.config import Settings, get_settings
 from meldai.db.postgres import PostgresSource
+from meldai.services.gemini_service import GeminiService, get_gemini_service
 from meldai.services.case_service import CaseService
-from meldai.utils import to_curie
+from meldai.utils import generate_run_id, save_prompt_to_tmp, save_response_to_tmp, to_curie
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +56,12 @@ class PostgresPrescriptionService:
         settings: Optional[Settings] = None,
         case_service: Optional[CaseService] = None,
         postgres_source: Optional[PostgresSource] = None,
+        gemini_service: Optional[GeminiService] = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._case_service = case_service or CaseService(settings=self._settings)
         self._postgres_source = postgres_source or PostgresSource(settings=self._settings)
+        self._gemini_service = gemini_service or get_gemini_service(self._settings)
 
     def fetch_past_encounters(
         self,
@@ -259,14 +263,33 @@ class PostgresPrescriptionService:
             logger.error("Failed querying similar cases in PostgreSQL: %s", exc, exc_info=True)
             return []
 
+    def load_medicine_master(self, file_path: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Load and return local medicine master dataset from JSON."""
+        target_path = Path(file_path or self._settings.medicine_master_json_path)
+        if not target_path.is_file():
+            repo_root = Path(__file__).resolve().parent.parent.parent.parent
+            candidate = repo_root / target_path
+            if candidate.is_file():
+                target_path = candidate
+        if target_path.is_file():
+            try:
+                with open(target_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        return data
+            except Exception as exc:
+                logger.warning("Failed to load local medicine master from %s: %s", target_path, exc)
+        return []
+
     def prepare_prompt(
         self,
         decorated_case: DecoratedCase,
         past_cases: List[Dict[str, Any]],
         similar_cases: List[Dict[str, Any]],
         system_text: Optional[str] = None,
+        medicine_master: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        """Construct the prompt combining current case, past visits, and similar cases with medications."""
+        """Construct the prompt combining current case, past visits, similar cases, and local medicine master."""
         prompt_lines: List[str] = []
 
         # 1. System & contextual instructions
@@ -376,29 +399,55 @@ class PostgresPrescriptionService:
         prompt_lines.append("</data>")
         prompt_lines.append("")
 
-        # 5. Output format constraint
-        prompt_lines.append("### TASK & RESPONSE FORMAT:")
+        # 5. Local medicine master (formulary dataset)
+        med_master = medicine_master if medicine_master is not None else self.load_medicine_master()
+        if med_master:
+            prompt_lines.append("<medication-master>")
+            prompt_lines.append("```json")
+            prompt_lines.append(json.dumps(med_master, indent=2))
+            prompt_lines.append("```")
+            prompt_lines.append("</medication-master>")
+            prompt_lines.append("")
+
+        # 6. Output format constraint
+        prompt_lines.append("### RESPONSE FORMAT:")
         prompt_lines.append(
-            "Based on the current patient encounter, past visits, and doctor's historical prescription patterns in similar cases, "
-            "recommend the optimal medications. Respond strictly in valid JSON adhering to this schema:\n"
+            "Respond strictly in valid JSON adhering to this schema:\n"
             "{\n"
             '  "chain_of_thought": {\n'
             '    "hypothesis": "What the picture suggests based on age, sex, diagnoses, and symptoms.",\n'
             '    "history_analysis": "What changed/persisted from past visits and implied actions.",\n'
             '    "similar_cases_analysis": "Pattern of drug classes/brands used by this doctor for this profile.",\n'
+            '    "formulary_match": "Matching patient symptoms/diagnoses with available brands in the local medicine master.",\n'
             '    "research": "Generic composition and cautions for the considered drugs."\n'
             "  },\n"
             '  "missing_information": ["List of data points the physician should verify"],\n'
             '  "recommended_medications": [\n'
             "    {\n"
-            '      "brand_name": "Exact brand / medicine name",\n'
-            '      "basis": "patient_history OR similar_cases OR outside_pattern",\n'
+            '      "brand_name": "Exact brand / medicine name from local medicine master or history",\n'
+            '      "basis": "patient_history OR similar_cases OR formulary_match OR outside_pattern",\n'
             '      "cautions": "Safety concerns or drug conflicts, if any",\n'
             '      "depends_on_missing_info": true OR false\n'
             "    }\n"
             "  ],\n"
+            '  "medications": [\n'
+            "    {\n"
+            '      "brand_name": "Exact brand_name from local medicine master",\n'
+            '      "canonical_molecule": "Exact canonical_molecule from local medicine master",\n'
+            '      "is_fdc": false,\n'
+            '      "constituent_strengths_mg": {\n'
+            '        "<molecule_name>": 0.0\n'
+            "      },\n"
+            '      "modal_strength_mg": 0.0,\n'
+            '      "release_form": "Exact release_form from local medicine master (e.g., Regular, SR, ER)",\n'
+            '      "dosage_tier": "Exact dosage_tier from local medicine master (e.g., STANDARD_MAINTENANCE)",\n'
+            '      "dosage_group_id": "Exact dosage_group_id from local medicine master",\n'
+            '      "clinical_dosing_indication": "Exact clinical_dosing_indication from local medicine master"\n'
+            "    }\n"
+            "  ],\n"
             '  "explanation": "Clinical justification explaining the final selection."\n'
-            "}"
+            "}\n"
+            "CRITICAL: 'medications' must return a list of full objects of each medication master item exactly as present in <medication-master> rather than just the brand or medicine name string."
         )
 
         return "\n".join(prompt_lines)
@@ -448,23 +497,52 @@ class PostgresPrescriptionService:
             decorated_case.caseNo, len(past_cases), len(similar_cases)
         )
 
-        # 3. Assemble prompt
+        # 3. Assemble prompt including local medicine master catalog
+        medicine_master = self.load_medicine_master()
         prompt = self.prepare_prompt(
             decorated_case=decorated_case,
             past_cases=past_cases,
             similar_cases=similar_cases,
+            medicine_master=medicine_master,
         )
 
-        # 4. Print and log the prompt
-        divider = "=" * 80
-        print(f"\n{divider}\n[ACTIVE LLM PROMPT FOR CASE: {decorated_case.caseNo or 'N/A'}]\n{divider}\n{prompt}\n{divider}\n", flush=True)
-        logger.info("Assembled prompt generated successfully (length: %d chars)", len(prompt))
+        # 4. Generate run ID and save executed prompt to tmp file
+        run_id = generate_run_id(case_no=decorated_case.caseNo)
+        save_prompt_to_tmp(prompt, run_id=run_id)
 
-        # Return prompt in response (LLM invocation deferred)
+        # 5. Call Gemini LLM and dump raw response to tmp file
+        try:
+            llm_result = self._gemini_service.generate_prescription(prompt, run_id=run_id)
+            save_response_to_tmp(llm_result.get("raw_response", ""), run_id=run_id)
+        except Exception as exc:
+            save_response_to_tmp(f"ERROR: {exc}", run_id=run_id)
+            raise
+
+        medications = llm_result.get("medications", [])
+        if not medications and "recommended_medications" in llm_result:
+            recs = llm_result.get("recommended_medications")
+            if isinstance(recs, list):
+                medications = [
+                    item.get("medication_master_item") or item.get("medication") or item
+                    if (isinstance(item, dict) and (item.get("medication_master_item") or item.get("medication") or len(item) > 2))
+                    else (item.get("brand_name") if isinstance(item, dict) else str(item))
+                    for item in recs
+                    if (isinstance(item, dict) and item.get("brand_name")) or (isinstance(item, str) and item.strip()) or (isinstance(item, dict) and len(item) > 1)
+                ]
+        explanation = llm_result.get("explanation", "")
+        response_time = llm_result.get("response_time_seconds")
+        tokens_used = llm_result.get("tokens_used")
+        cost_usd = llm_result.get("cost_usd")
+        total_tokens = tokens_used.get("total_tokens") if isinstance(tokens_used, dict) else None
+
         return PrescribeMedicationsResponse(
-            medications=[],
-            explanation="Prompt generated and logged successfully (LLM invocation deferred).",
+            medications=medications,
+            explanation=explanation,
             pastCasesCount=len(past_cases),
             similarCasesCount=len(similar_cases),
-            prompt=prompt,
+            responseTimeSeconds=response_time,
+            tokensUsed=tokens_used,
+            totalTokens=total_tokens,
+            costUsd=cost_usd,
+            runId=run_id,
         )

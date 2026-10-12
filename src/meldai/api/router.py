@@ -3,7 +3,7 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from meldai.api.req_dtos import (
     BatchSymptomMatchRequest,
     BioLORDEmbedRequest,
@@ -22,16 +22,16 @@ from meldai.api.res_dtos import (
     ChiefComplaintsRunStatusResponse,
     EmbedResponse,
     FindSimilarCaseResponse,
-    HPOMatchItem,
     LoadMedicineMasterResponse,
     MedicationSearchQueryResponse,
     MedicineSearchResponse,
-    MONDOMatchItem,
     PatientDemographicsMigrationResponse,
     PatientDiagnosisMigrationResponse,
     PatientMedicationMigrationResponse,
     PatientVisitMigrationResponse,
     PrescribeMedicationsResponse,
+    PrescribePipelineActionResponse,
+    PrescribePipelineStatusResponse,
     SegmentSymptomsResponse,
     SymptomItem,
     SymptomMatchResult,
@@ -40,12 +40,13 @@ from meldai.api.res_dtos import (
 from meldai.config import get_settings
 from meldai.db.mongodb import MongoKnowledgeBase
 from meldai.db.postgres import PostgresSource
-from meldai.nlp.biolord import BioLORDEmbedder, get_biolord_embedder
+from meldai.nlp.biolord import get_biolord_embedder
 from meldai.nlp.medspacy_nlp import get_medspacy_service
-from meldai.nlp.sapbert import SapBERTEmbedder, get_sapbert_embedder
+from meldai.nlp.sapbert import get_sapbert_embedder
 from meldai.services.assertion_service import ClinicalAssertionService
 from meldai.services.case_service import CaseService
 from meldai.services.chief_complaints_runner import get_chief_complaints_runner
+from meldai.services.prescribe_pipeline_runner import get_prescribe_pipeline_runner
 from meldai.services.gemini_service import get_gemini_service
 from meldai.services.medicine_master_service import MedicineMasterService
 from meldai.services.migration_service import MigrationService
@@ -144,10 +145,12 @@ def _get_postgres_prescription_service() -> PostgresPrescriptionService:
     settings = get_settings()
     case_svc = _get_case_service()
     pg = PostgresSource(settings)
+    gemini = get_gemini_service(settings)
     return PostgresPrescriptionService(
         settings=settings,
         case_service=case_svc,
         postgres_source=pg,
+        gemini_service=gemini,
     )
 
 
@@ -599,5 +602,51 @@ def generate_medication_search_queries(
         raise HTTPException(status_code=500, detail=f"Medication search query generation failed: {str(exc)}") from exc
 
 
+# ---------------------------------------------------------------------------
+# Prescribe Pipeline (batch run all cases through predict_medications)
+# ---------------------------------------------------------------------------
+
+@api_router.post(
+    "/cases/prescribe-pipeline/start",
+    response_model=PrescribePipelineActionResponse,
+    summary="Start the prescribe-medications batch pipeline in the background",
+)
+def start_prescribe_pipeline() -> PrescribePipelineActionResponse:
+    """Kick off the background pipeline that runs prescribe_medications for every
+    case in prescribe-request-all-cases.json and writes results to tmp/."""
+    runner = get_prescribe_pipeline_runner()
+    res = runner.start()
+    if res.get("status") == "conflict":
+        raise HTTPException(status_code=409, detail=res["message"])
+    return PrescribePipelineActionResponse(
+        status=res["status"],
+        message=res["message"],
+        run_id=res.get("run_id"),
+        result_file=res.get("result_file"),
+    )
 
 
+@api_router.post(
+    "/cases/prescribe-pipeline/stop",
+    response_model=PrescribePipelineActionResponse,
+    summary="Request graceful stop of the active prescribe-medications pipeline",
+)
+def stop_prescribe_pipeline() -> PrescribePipelineActionResponse:
+    """Signal the running pipeline to stop after the current case finishes."""
+    runner = get_prescribe_pipeline_runner()
+    res = runner.stop()
+    return PrescribePipelineActionResponse(
+        status=res["status"],
+        message=res["message"],
+    )
+
+
+@api_router.get(
+    "/cases/prescribe-pipeline/status",
+    response_model=PrescribePipelineStatusResponse,
+    summary="Poll the current state and progress of the prescribe-medications pipeline",
+)
+def get_prescribe_pipeline_status() -> PrescribePipelineStatusResponse:
+    """Returns progress counters, current case, elapsed time, and path to the result file."""
+    runner = get_prescribe_pipeline_runner()
+    return PrescribePipelineStatusResponse(**runner.get_status())
