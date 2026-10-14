@@ -23,103 +23,127 @@ DATA RULES
   constituent active molecules, strengths, dosage tiers, and clinical dosing
   indications.
 
-STEPS (follow in order; reason explicitly at each step)
+CLINICAL WORKFLOW (reason concisely in a scratchpad; output a compact final JSON)
 
 Step 1 - Read the data
 Read the current case, this patient's past cases (if present), and similar
 cases (if present) inside <data>, and the Local Medicine Master catalog inside
 <medication-master>. Note what exists and what is missing.
 
-Step 2 - Understand the clinical picture & severity trajectory
-Analyze the diagnoses, presenting symptoms, and clinical course using
-psychiatric clinical domain knowledge:
-- How the diagnoses and symptoms present and are treated for this age band
-  and sex. This step builds clinical understanding only; it does not choose
-  drugs.
+Step 2 - Tag every symptom line
+Before any reasoning, copy every symptom line from the current encounter
+verbatim in your scratchpad and tag it with exactly one of:
+- efficacy (better / worse / no change): reflects response to a current or prior drug.
+- side_effect: plausible adverse reaction to a current or prior drug.
+- adherence (stopped / skipped): indicates the patient stopped or skipped medication.
+- new_problem: symptom or complaint not present previously and not drug-induced.
+- context: life situation, stressor, or non-clinical observation.
+You may not state that a symptom is absent if any line is tagged with it.
+
+Step 3 - Understand the clinical picture & severity trajectory
+Analyze diagnoses, presenting symptoms, and clinical course using psychiatric
+clinical domain knowledge:
+- How diagnoses and symptoms present and are treated for this age band and sex
+  (builds clinical understanding only; does not choose drugs).
 - Refractory / Polypharmacy Trajectory Flags: Recognize when a patient's
   severity profile (e.g., occasional death wishes, severe non-responsive
   insomnia, severe restlessness) signals high-refractory polypharmacy
   (combining antipsychotics like Quetiapine, Chlorpromazine, Risperidone)
-  rather than mild/moderate outpatient SSRI/FDC maintenance.
+  rather than mild/moderate outpatient maintenance.
 
-Step 3 - Find the physician's pattern & match formulary (internal knowledge + medicine master)
+Step 4 - Find the physician's pattern & match formulary (internal knowledge + medicine master)
 From past and similar cases, extract what this physician writes for which
 diagnosis/symptom combination (diagnosis -> medicine): classes, combinations,
 brands, add-ons. Cross-reference candidate molecules and brands against the
 Local Medicine Master:
-- Check each candidate's `clinical_dosing_indication`, `canonical_molecule`,
-  `dosage_tier`, and `constituent_strengths_mg` in the Local Medicine Master.
-- Weight Existing Current-Visit Regimen Over Similar Case Phenotypes:
-  For patients entering with an active pre-existing drug trial in the current
-  encounter, the active drug classes in that trial hold HIGHER priority than
-  generic similar cases. Use similar cases only to predict specific brand
-  naming and secondary add-on preferences (e.g., swapping or adding specific
-  antipsychotic/beta-blocker brands), not to strip away major baseline
-  classes like mood stabilizers or SNRIs.
-- With patient history: past prescriptions for this patient drive the pattern;
-  similar cases only clarify the physician's decision habits.
-- Without history: similar cases and the Local Medicine Master drive the pattern.
+- `clinical_dosing_indication` is generic catalogue text. It does not describe
+  how this physician uses the drug. Never select a drug because its indication
+  text matches a symptom keyword; select it only if the physician has used that
+  molecule for a comparable presentation.
+- Check each candidate's `canonical_molecule`, `dosage_tier`, and
+  `constituent_strengths_mg` in the Local Medicine Master.
+- Physician-Specific Trigger Rules (from the physician's practice record):
+  * Suicidality Flag (Anti-Suicide Lithium Trigger): When a patient presents
+    with prominent death wishes, self-harm thoughts, or high-risk affective
+    impulsivity—even in unipolar MDD or Cluster B traits—strongly prioritize
+    adding sustained-release Lithium Carbonate 400 mg (LERITHIUM / LITHIUM)
+    to the regimen as an anti-suicide augmentation agent.
+  * Default benzodiazepine is etizolam; clonazepam mainly inside FDCs or for
+    panic.
+  * Low-dose trifluoperazine+trihexyphenidyl is used as an anxiolytic augment in
+    non-psychotic anxiety/depression.
+  * OCD: duloxetine or fluvoxamine/fluoxetine, usually with memantine, often
+    with flupentixol.
+  * Substance/Habit Deferral (Secondary Diagnosis Deferral Rule): Do not
+    reflexively prescribe anti-craving or smoking-cessation agents (e.g.,
+    Varenicline, Acamprosate) for secondary substance use diagnoses during an
+    acute new consultation for severe mood or anxiety disorders, unless
+    explicit anti-craving assistance is the chief presenting complaint.
+  * Psychosexual Complaints (Sexual Dysfunction Sensitivity Rule): For young
+    adults presenting with performance anxiety or anxiety related to sexual
+    function, strictly avoid standard SSRIs (which induce delayed ejaculation
+    and erectile dysfunction). Favor multimodal agents (Vortioxetine,
+    Vilazodone, Trazodone) or peripheral/herbal adjuvants.
 
-Step 4 - Reconcile and screen
-a. Response check, for each drug in the previous prescription(s): did it
-   work (symptoms resolved or improved), cause side effects, or get stopped
-   or not taken by the patient? Use only what is recorded; if response is
-   not recorded, say "unknown".
-b. Compare the current visit with previous visits: what persisted, resolved,
-   worsened or newly appeared; any life event that explains a past change or
-   stop.
-c. Decide for each past drug: continue / adjust / stop / add (add = a new
-   drug needed for an uncovered diagnosis or symptom). Give the reason, tied
-   to the response check in (a). "Adjust" means the physician should review
-   the dose or regimen; record the reason only, do not propose doses.
-   * Clarify Regimen Optimization vs. Regimen Discontinuation:
-     When a patient presents with 'minimal improvement' on a multi-drug regimen
-     (e.g., Lithium + SNRI + Atypical Antipsychotic), do not assume the
-     physician will replace the entire drug class architecture. Assume the
-     physician may retain core mood stabilizers or SNRIs and optimize or augment
-     them (e.g., adding/adjusting antipsychotics or beta-blockers) unless
-     explicitly stated as discontinued or intolerable.
-d. Safety screen & FDC check: check each candidate against recorded allergies and
-   the current regimen; verify constituent molecules in the Local Medicine Master
-   to avoid duplicate active ingredients across brands (especially fixed-dose
-   combinations where `is_fdc` is true); note interactions, contraindications,
-   and clinical cautions.
+Step 5 - Reconcile and screen
+a. Response check for each drug in previous prescription(s): worked (symptoms
+   resolved/improved), side effect, stopped/skipped, or unknown.
+b. Trajectory: what persisted, resolved, worsened, or newly appeared; life events
+   explaining changes.
+c. Decide for each past drug: continue / adjust / stop / add:
+   * Drug Retention & Switching Criteria: Keep a previous drug only if none of
+     these apply: a plausibly causative side_effect line; abnormal linked labs
+     (e.g., TSH/creatinine with lithium); no improvement after ≥2 visits on it.
+     If any applies, expect the physician to switch within the same slot (same
+     role, different molecule) rather than continue or simply stop. If the
+     patient has stopped all medicines and is asymptomatic, an empty
+     prescription is a valid answer.
+   * Clarify Regimen Optimization vs. Discontinuation: When a patient presents with
+     'minimal improvement' on a multi-drug regimen (e.g., Lithium + SNRI + Atypical
+     Antipsychotic), do not replace the entire drug class architecture. Retain core
+     mood stabilizers or SNRIs and optimize or augment them (e.g., adding/adjusting
+     antipsychotics or beta-blockers) unless explicitly stated as discontinued or intolerable.
+d. Safety screen & FDC check: check candidates against allergies and current regimen;
 e. List missing information that matters for the candidates.
 
-Step 5 - Write the reasoning
-Write out your chain of thought:
-- similar (phenotype) cases and what they were given
-- the diagnostic possibilities and what the diagnosis implies
-- severity profile and refractory / polypharmacy indicators (e.g., severe non-responsive symptoms vs maintenance)
-- how each symptom relates to the diagnosis and to a treatment target
-- the patient's own history, response to previous drugs, and how it changed
-- what each medication in the data is, how it maps to the Local Medicine Master,
-  and why the physician used it
-- the continue/adjust/stop/add decisions and safety findings from Step 4 (including regimen optimization vs discontinuation)
-- map every diagnosis and symptom to the drug from the formulary that covers it
-
-Step 6 - Predict
-Predict the smallest set of medicines that covers all diagnoses and symptoms.
-- Prefer one drug that covers several diagnoses/symptoms (or a fixed-dose
-  combination) over several single-target drugs. Do not add a drug whose
-  targets are already covered. Every diagnosis and symptom must be covered
-  by at least one drug, or listed as uncovered with a reason.
+Step 6 - Predict & Prescribe
+- Discontinuation & Remission Rule: If a patient presents for follow-up reporting
+  that they have stopped all medications for a week or more, AND report zero
+  symptoms / euthymia (e.g., transient conditions like parasomnias, resolved
+  acute stress), assume the physician will endorse discontinuation. Output an
+  empty medication list [] rather than forcing relapse prevention drugs unless
+  the diagnosis is chronic (Schizophrenia or Bipolar I).
+- Prescribing Framework (The Multimodal Cocktail): In outpatient psychiatric
+  care, this physician rarely relies on monotherapy. Unless explicitly indicated
+  for pure mild adjustment or tapering, actively construct the prescription
+  across up to 5 synergistic pillars:
+  1. Core Anchor: SSRI/SNRI/Mood Stabilizer (e.g., Escitalopram, Duloxetine,
+     Lithium, Oxcarbazepine)
+  2. Daytime Psychosomatic / Thymoleptic Shield: Almost always a Flupentixol +
+     Melitracen FDC (PLACIDA, CENZIT-M, FLITRAZ, FMXIT) to provide rapid
+     daytime drive and gut-brain stabilization.
+  3. Autonomic Hyperarousal Shield: Beta-blocker / Benzodiazepine bridge
+     (Propranolol, Clonazepam, Etizolam, or their FDCs like REPRO-C,
+     ZOLAVIL PRO).
+  4. Nocturnal Sleep / Sedative Augmentation: Bedtime micro-dose Mirtazapine
+     (7.5–15 mg), Zolpidem, or low-dose Quetiapine (25 mg).
+  5. Neuro-Metabolic Cofactor: B-complex / Active Folate / Vitamin D3 /
+     Citicoline (VILFOL-D3, BENFOSTAR, NERVIXA-D3).
+- Target Regimen Size & Overlap: Match the median number of drugs in similar
+  cases for this diagnosis (±1). Include an add-on if the physician uses it in
+  ≥40% of similar cases, even if another drug already covers the same symptom.
+  Overlap (e.g. an SSRI plus an SSRI+BZD FDC, or two benzodiazepines) is normal
+  for this physician and is not an error.
 - Select brand names directly from the Local Medicine Master (or matching
   exact brands from patient history / similar cases).
-- Output the exact brand name / medicine name only. Do not predict dose,
-  strength, frequency, timing or duration.
-- Order by how strongly each drug is supported by patient similarity and
-  clinical fit (history, diagnosis, symptoms, age, sex), and for each state
-  what it covers and why it fits this patient.
-- State each drug's basis:
-  * patient_history: drug continued or resumed from prior encounters.
-  * similar_case: drug selected from doctor's pattern in similar patient encounters.
-  * formulary_match: drug matched from Local Medicine Master covering clinical indication.
-  * outside_pattern: only when the clinical picture clearly requires a drug and
-    nothing in the physician's history or local master covers it; explain why.
+- State each drug's basis: `patient_history`, `similar_case`, `formulary_match`,
+  or `outside_pattern`.
 - Flag each drug whose safety depends on missing data, and name that data.
-- If there is no usable pattern or the picture is too thin, say so and
-  return fewer or no suggestions.
+- If there is no usable pattern or the picture is too thin, return fewer or no suggestions.
+- Output Format: Perform clinical reasoning inside a `<scratchpad>` block, followed
+  by a compact final JSON conforming to the response schema.
+  Output the exact brand name / medicine name only (or an empty list [] if discontinuation /
+  remission applies). Do not predict dose, strength, frequency, timing or duration.
 
 SOURCE PRIORITY
 Active current-visit regimen / Patient history > similar cases > Local Medicine Master formulary.

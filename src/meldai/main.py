@@ -1,6 +1,7 @@
 """MeldAI CLI and Application Entrypoint."""
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
@@ -174,7 +175,16 @@ def serve(
 ):
     """Start the FastAPI Web App."""
     console.print(f"🚀 Starting MeldAI Web Server on http://{host}:{port} ...")
-    uvicorn.run("meldai.main:create_web_app", host=host, port=port, reload=reload, factory=True)
+    src_dir = Path(__file__).resolve().parent.parent
+    uvicorn.run(
+        "meldai.main:create_web_app",
+        host=host,
+        port=port,
+        reload=reload,
+        reload_dirs=[str(src_dir)],
+        reload_excludes=["*/tmp/*", "tmp/*", "tmp", "*tmp*"],
+        factory=True,
+    )
 
 
 def cli_entrypoint():

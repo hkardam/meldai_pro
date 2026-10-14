@@ -97,6 +97,7 @@ class GeminiService:
         config = types.GenerateContentConfig(
             temperature=temperature if temperature is not None else self._temperature,
             response_mime_type="application/json",
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
 
         try:
