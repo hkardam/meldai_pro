@@ -41,6 +41,10 @@ uvicorn[standard]>=0.30.0
 # LLM Service (Google Gemini)
 google-genai>=1.0.0
 
+# Analysis & Visualization
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
 # Code Quality & Testing
 pytest>=8.2.0
 ruff>=0.4.4

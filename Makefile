@@ -1,4 +1,4 @@
-.PHONY: help build up down restart logs bash debug run-pipeline test export-postman download-ontologies clean
+.PHONY: help build up down restart logs bash debug run-pipeline test export-postman download-ontologies analyze accuracy-matrix clean
 
 help:
 	@echo "======================================================================"
@@ -11,6 +11,7 @@ help:
 	@echo "  make download-ontologies  : Download HPO (hp.obo) and MONDO (mondo.obo) OBO files"
 	@echo "  make test           : Run automated test suite inside Docker"
 	@echo "  make export-postman : Generate/sync Postman Collection JSON"
+	@echo "  make analyze        : Run prescription accuracy matrix & charts (FILE=path.json)"
 	@echo "  make logs           : Stream live logs from all containers"
 	@echo "  make down           : Stop all running containers"
 	@echo "  make clean          : Remove containers, volumes, and temporary caches"
@@ -51,6 +52,15 @@ export-postman:
 
 download-ontologies:
 	docker compose run --rm app python scripts/download_ontologies.py
+
+analyze:
+	@if docker compose ps --services --filter "status=running" | grep -q "^app$$"; then \
+		docker compose exec app python scripts/analyzer/accuracy_matrix.py $(FILE); \
+	else \
+		docker compose run --rm -e DEBUG_MODE=false app python scripts/analyzer/accuracy_matrix.py $(FILE); \
+	fi
+
+accuracy-matrix: analyze
 
 clean:
 	docker compose down -v

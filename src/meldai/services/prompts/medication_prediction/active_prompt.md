@@ -79,11 +79,25 @@ Local Medicine Master:
     Varenicline, Acamprosate) for secondary substance use diagnoses during an
     acute new consultation for severe mood or anxiety disorders, unless
     explicit anti-craving assistance is the chief presenting complaint.
-  * Psychosexual Complaints (Sexual Dysfunction Sensitivity Rule): For young
-    adults presenting with performance anxiety or anxiety related to sexual
-    function, strictly avoid standard SSRIs (which induce delayed ejaculation
-    and erectile dysfunction). Favor multimodal agents (Vortioxetine,
-    Vilazodone, Trazodone) or peripheral/herbal adjuvants.
+  * Psychosexual Complaints (Sexual Dysfunction Sensitivity Rule): ONLY applies
+    when the presenting symptoms EXPLICITLY mention sexual performance anxiety,
+    erectile dysfunction, premature ejaculation, or loss of libido. Do NOT apply
+    this rule based on age/gender or general somatic anxiety alone. When explicitly
+    present, strictly avoid standard SSRIs (which induce delayed ejaculation and
+    erectile dysfunction). Favor multimodal agents (Vortioxetine, Vilazodone,
+    Trazodone) or peripheral/herbal adjuvants.
+  * Antipsychotic Selection Specificity: Do not freely interchange antipsychotics.
+    Each antipsychotic serves a distinct clinical role in this physician's practice:
+    - Olanzapine (e.g., OLIZA, OLEANZ): First-line choice for acute psychosis,
+      bipolar mania, severe agitation, or prominent appetite/sleep deficit.
+    - Quetiapine 25 mg (e.g., QUETIAPIN, QUTIPIN): Used specifically for nocturnal
+      sleep/sedation augmentation or anxiety augmentation, NOT as an antipsychotic.
+    - Blonanserin (e.g., BLONITAS): Preferred for schizophrenia maintenance with
+      negative/cognitive symptoms and low metabolic risk.
+    - Risperidone: Preferred for irritability, aggression, pediatric/adolescent
+      behavioral issues, or standard maintenance.
+    Select the specific antipsychotic that matches the exact clinical role and
+    physician's pattern in similar cases.
 
 Step 5 - Reconcile and screen
 a. Response check for each drug in previous prescription(s): worked (symptoms
@@ -103,8 +117,23 @@ c. Decide for each past drug: continue / adjust / stop / add:
      Antipsychotic), do not replace the entire drug class architecture. Retain core
      mood stabilizers or SNRIs and optimize or augment them (e.g., adding/adjusting
      antipsychotics or beta-blockers) unless explicitly stated as discontinued or intolerable.
-d. Safety screen & FDC check: check candidates against allergies and current regimen;
-e. List missing information that matters for the candidates.
+d. FDC vs Individual Component Decision Rule:
+   When candidate molecules exist both as standalone brands AND inside one or more
+   Fixed Dose Combination (FDC) brands in the Local Medicine Master (e.g.,
+   Escitalopram + Clonazepam, Etizolam + Propranolol, Flupentixol + Melitracen),
+   decide between FDC vs separate individual drugs using this priority order:
+   1. Patient's own prescription history (strongest signal): If the patient was
+      previously prescribed an FDC or separate individual components, retain that
+      exact formulation structure unless there is an explicit clinical reason to change.
+   2. For new cases (no prior patient prescription history): Find the physician's
+      similar cases specifically where visit_reason = "new consultation" to observe
+      whether the physician prescribed the FDC or separate individual drugs for
+      this presentation.
+   3. Else / General preference for new visits: Prefer the FDC formulation for
+      new visits/consultations because a single combination pill is significantly
+      easier for patients to take and adhere to, rather than managing 2 separate drugs.
+e. Safety screen & safety checks: check candidates against allergies and current regimen;
+f. List missing information that matters for the candidates.
 
 Step 6 - Predict & Prescribe
 - Discontinuation & Remission Rule: If a patient presents for follow-up reporting
@@ -113,22 +142,31 @@ Step 6 - Predict & Prescribe
   acute stress), assume the physician will endorse discontinuation. Output an
   empty medication list [] rather than forcing relapse prevention drugs unless
   the diagnosis is chronic (Schizophrenia or Bipolar I).
+- Empty-Prescription Guard: An empty medication list [] is ONLY valid when the
+  Discontinuation & Remission Rule explicitly applies (patient stopped meds for
+  ≥1 week AND reports zero symptoms / full euthymia AND the diagnosis is not chronic).
+  For all other presentations with active symptoms or distress, predict at least one
+  medication even if the clinical picture is ambiguous or unfamiliar. Never output []
+  for patients with active pathology.
 - Prescribing Framework (The Multimodal Cocktail): In outpatient psychiatric
-  care, this physician rarely relies on monotherapy. Unless explicitly indicated
-  for pure mild adjustment or tapering, actively construct the prescription
-  across up to 5 synergistic pillars:
+  care, this physician tends toward multimodal regimens rather than monotherapy.
+  However, do NOT blindly prescribe all 5 pillars. For each pillar below, evaluate
+  whether the patient's presentation and similar cases support it:
   1. Core Anchor: SSRI/SNRI/Mood Stabilizer (e.g., Escitalopram, Duloxetine,
-     Lithium, Oxcarbazepine)
-  2. Daytime Psychosomatic / Thymoleptic Shield: Almost always a Flupentixol +
-     Melitracen FDC (PLACIDA, CENZIT-M, FLITRAZ, FMXIT) to provide rapid
-     daytime drive and gut-brain stabilization.
+     Lithium, Oxcarbazepine).
+  2. Daytime Psychosomatic / Thymoleptic Shield: Flupentixol + Melitracen FDC
+     (PLACIDA, CENZIT-M, FLITRAZ, FMXIT). Include ONLY if similar cases for this
+     diagnosis demonstrate it in ≥40% of prescriptions OR if somatic/anxiety
+     complaints clearly warrant gut-brain stabilization. Do not add unconditionally.
   3. Autonomic Hyperarousal Shield: Beta-blocker / Benzodiazepine bridge
      (Propranolol, Clonazepam, Etizolam, or their FDCs like REPRO-C,
-     ZOLAVIL PRO).
+     ZOLAVIL PRO) when anxiety, agitation, tremors, or palpitations are evident.
   4. Nocturnal Sleep / Sedative Augmentation: Bedtime micro-dose Mirtazapine
-     (7.5–15 mg), Zolpidem, or low-dose Quetiapine (25 mg).
+     (7.5–15 mg), Zolpidem, or low-dose Quetiapine (25 mg) if insomnia or severe
+     nocturnal distress is reported.
   5. Neuro-Metabolic Cofactor: B-complex / Active Folate / Vitamin D3 /
-     Citicoline (VILFOL-D3, BENFOSTAR, NERVIXA-D3).
+     Citicoline (VILFOL-D3, BENFOSTAR, NERVIXA-D3) when fatigue, cognitive slowing,
+     or deficiency cofactors are indicated or prevalent in similar cases (≥40%).
 - Target Regimen Size & Overlap: Match the median number of drugs in similar
   cases for this diagnosis (±1). Include an add-on if the physician uses it in
   ≥40% of similar cases, even if another drug already covers the same symptom.
