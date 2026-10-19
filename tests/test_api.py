@@ -223,73 +223,82 @@ def test_load_chief_complaints_success():
         )
     ]
 
-    with patch("meldai.api.router.PostgresSource", return_value=mock_pg), \
-         patch("meldai.api.router.MongoKnowledgeBase", return_value=mock_mongo), \
-         patch("meldai.api.router.get_medspacy_service", return_value=mock_nlp), \
-         patch("meldai.api.router.get_hpo_service", return_value=mock_hpo), \
-         patch("meldai.api.router.get_mondo_service", return_value=mock_mondo):
-        resp = client.post("/api/v1/cases/migrate-patient-chief-complaints", params={"batch_size": 50})
+    with patch("meldai.api.router._get_migration_service") as mock_get_svc:
+        mock_svc = MagicMock()
+        mock_svc.run_patient_migration.return_value = {
+            "status": "success",
+            "batch_size": 20,
+            "total_records_processed": 10,
+            "batches_processed": 1,
+            "upserted_count": 10,
+            "modified_count": 0,
+            "matched_count": 0,
+            "execution_time_seconds": 0.5,
+        }
+        mock_get_svc.return_value = mock_svc
+
+        resp = client.post("/api/v1/cases/migrate", params={"batch_size": 20})
 
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "success"
-    assert data["batch_size"] == 50
-    assert data["total_rows_processed"] == 1
-    assert data["documents_updated"] == 1
-    assert data["documents_skipped"] == 0
-    assert data["batches_processed"] == 1
-
-    # Verify update_case_symptoms was called with patient_visit_id
-    mock_mongo.update_case_symptoms.assert_called_once()
-    call_args = mock_mongo.update_case_symptoms.call_args[0]
-    assert call_args[0] == "case-uuid-1"
-    symptoms = call_args[1]
-    assert len(symptoms) == 2
-    assert symptoms[0]["note"] == "headache"
-    assert symptoms[0]["patient_visit_id"] == "visit-uuid-1"
-    assert symptoms[0]["hpoCode"] == 2315
-    assert symptoms[0]["mondoCode"] == 5555
-    assert symptoms[0]["is_negated"] is False
-    assert symptoms[1]["note"] == "no fever"
-    assert symptoms[1]["is_negated"] is True
+    assert data["batch_size"] == 20
+    assert data["total_records_processed"] == 10
+    assert data["upserted_count"] == 10
 
 
-def test_migrate_patient_chief_complaints_skipped_rows():
-    mock_pg = MagicMock()
-    mock_pg.stream_patient_chief_complaints.return_value = [
-        [
-            # Case 1: Empty note
-            {"caseNo": "M1001", "visitDate": "2024-01-01", "chiefComplaints": "   "},
-            # Case 2: MongoDB document not found
-            {"caseNo": "M1002", "visitDate": "2024-01-02", "chiefComplaints": "headache"},
-        ]
-    ]
+def test_migrate_patients_failure_raises_500():
+    with patch("meldai.api.router._get_migration_service") as mock_get_svc:
+        mock_svc = MagicMock()
+        mock_svc.run_patient_migration.side_effect = RuntimeError("PostgreSQL connection lost")
+        mock_get_svc.return_value = mock_svc
 
-    mock_mongo = MagicMock()
-    mock_mongo.find_case_by_encounter.return_value = None
-
-    with patch("meldai.api.router.PostgresSource", return_value=mock_pg), \
-         patch("meldai.api.router.MongoKnowledgeBase", return_value=mock_mongo):
-        resp = client.post("/api/v1/cases/migrate-patient-chief-complaints", params={"batch_size": 100})
-
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "success"
-    assert data["total_rows_processed"] == 2
-    assert data["documents_updated"] == 0
-    assert data["documents_skipped"] == 2
-
-
-def test_migrate_patient_chief_complaints_failure_raises_500():
-    mock_pg = MagicMock()
-    mock_pg.stream_patient_chief_complaints.side_effect = RuntimeError("PostgreSQL connection lost")
-
-    with patch("meldai.api.router.PostgresSource", return_value=mock_pg), \
-         patch("meldai.api.router.MongoKnowledgeBase", return_value=MagicMock()):
-        resp = client.post("/api/v1/cases/migrate-patient-chief-complaints", params={"batch_size": 100})
+        resp = client.post("/api/v1/cases/migrate", params={"batch_size": 20})
 
     assert resp.status_code == 500
     assert "PostgreSQL connection lost" in resp.json()["detail"]
+
+
+def test_migrate_patients_runner_endpoints():
+    with patch("meldai.api.router.get_patient_migration_runner") as mock_get_runner:
+        mock_runner = MagicMock()
+        mock_runner.start.return_value = {
+            "status": "started",
+            "message": "Patient migration started in background.",
+            "batch_size": 20,
+        }
+        mock_runner.get_status.return_value = {
+            "status": "running",
+            "batch_size": 20,
+            "current_batch": 1,
+            "total_batches": 5,
+            "total_records_processed": 20,
+            "documents_saved": 20,
+            "current_step": "extended",
+            "elapsed_seconds": 1.2,
+        }
+        mock_runner.stop.return_value = {
+            "status": "stopping",
+            "message": "Stop signal sent.",
+            "batch_size": 20,
+        }
+        mock_get_runner.return_value = mock_runner
+
+        # Start
+        resp_start = client.post("/api/v1/cases/migrate/start", params={"batch_size": 20})
+        assert resp_start.status_code == 200
+        assert resp_start.json()["status"] == "started"
+
+        # Status
+        resp_status = client.get("/api/v1/cases/migrate/status")
+        assert resp_status.status_code == 200
+        assert resp_status.json()["status"] == "running"
+        assert resp_status.json()["current_step"] == "extended"
+
+        # Stop
+        resp_stop = client.post("/api/v1/cases/migrate/stop")
+        assert resp_stop.status_code == 200
+        assert resp_stop.json()["status"] == "stopping"
 
 
 def test_find_similar_cases_endpoint():

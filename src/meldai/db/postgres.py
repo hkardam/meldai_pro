@@ -70,254 +70,69 @@ class PostgresSource:
             logger.info("Extracted %d clinical records from PostgreSQL", len(df))
             return df
 
-    def stream_patient_visit_data(self, batch_size: int = 1000):
-        """
-        Extract patient visit data from PostgreSQL table 'temp_migrations.patient_visit_data'
-        in batches of batch_size (default 1000).
-        Yields list of dicts for each batch.
-        """
-        query = text("""
-            SELECT
-                pvd."Case No",
-                pvd."Visit Date",
-                pvd."Visit Reason"
-            FROM temp_migrations.patient_visit_data pvd
-        """)
-
-        def _parse_case_no(val: Optional[str]) -> Any:
-            if val is None:
-                return 0
-            if isinstance(val, int):
-                return val
-            s_val = str(val).strip()
-            if s_val.isdigit():
-                return int(s_val)
-            digits = "".join(filter(str.isdigit, s_val))
-            if digits:
-                return int(digits)
-            return s_val
-
-        with self.engine.connect() as conn:
-            result = conn.execution_options(yield_per=batch_size).execute(query)
-            while True:
-                rows = result.fetchmany(batch_size)
-                if not rows:
-                    break
-                batch = []
-                for row in rows:
-                    raw_case_no, visit_date, visit_reason = row[0], row[1], row[2]
-                    case_no = _parse_case_no(raw_case_no)
-                    batch.append({
-                        "caseNo": case_no,
-                        "visitDate": visit_date,
-                        "visitReason": visit_reason,
-                    })
-                logger.info("Fetched batch of %d records from PostgreSQL", len(batch))
-                yield batch
-
-    def stream_grouped_patient_diagnoses(self, batch_size: int = 1000):
-        """
-        Extract patient diagnosis data grouped by Case No and Visit Date from 'temp_migrations.patient_diagnosis_data'.
-        Aggregates distinct diagnosis names into an array per encounter.
-        Yields list of dicts for each batch: [{"caseNo": int/str, "visitDate": str, "diagnosisNames": list[str]}].
-        """
-        query = text("""
-            SELECT
-                pdd."Case No",
-                pdd."Visit Date",
-                ARRAY_AGG(DISTINCT pdd."Diagnosis Name") AS diagnosis_names
-            FROM temp_migrations.patient_diagnosis_data pdd
-            WHERE pdd."Diagnosis Name" IS NOT NULL AND TRIM(pdd."Diagnosis Name") != ''
-            GROUP BY pdd."Case No", pdd."Visit Date"
-            ORDER BY pdd."Case No"
-        """)
-
-        def _parse_case_no(val: Optional[str]) -> Any:
-            if val is None:
-                return 0
-            if isinstance(val, int):
-                return val
-            s_val = str(val).strip()
-            if s_val.isdigit():
-                return int(s_val)
-            digits = "".join(filter(str.isdigit, s_val))
-            if digits:
-                return int(digits)
-            return s_val
-
-        with self.engine.connect() as conn:
-            result = conn.execution_options(yield_per=batch_size).execute(query)
-            while True:
-                rows = result.fetchmany(batch_size)
-                if not rows:
-                    break
-                batch = []
-                for row in rows:
-                    raw_case_no, visit_date, diagnosis_names = row[0], row[1], row[2]
-                    case_no = _parse_case_no(raw_case_no)
-                    batch.append({
-                        "caseNo": case_no,
-                        "visitDate": visit_date,
-                        "diagnosisNames": list(diagnosis_names) if diagnosis_names else [],
-                    })
-                logger.info("Fetched batch of %d grouped diagnosis records from PostgreSQL", len(batch))
-                yield batch
-
-    def get_patient_visit_count(self) -> int:
-        """Get total record count for patient visit data in PostgreSQL."""
+    def get_patient_migration_count(self) -> int:
+        """Get total record count for patient encounters to migrate from PostgreSQL."""
         query = text('SELECT COUNT(*) FROM temp_migrations.patient_visit_data')
         with self.engine.connect() as conn:
             return conn.execute(query).scalar() or 0
 
-    def get_grouped_patient_diagnoses_count(self) -> int:
-        """Get total grouped encounter count for patient diagnosis data in PostgreSQL."""
-        query = text("""
-            SELECT COUNT(*) FROM (
-                SELECT 1
-                FROM temp_migrations.patient_diagnosis_data pdd
-                WHERE pdd."Diagnosis Name" IS NOT NULL AND TRIM(pdd."Diagnosis Name") != ''
-                GROUP BY pdd."Case No", pdd."Visit Date"
-            ) sub
-        """)
-        with self.engine.connect() as conn:
-            return conn.execute(query).scalar() or 0
-
-
-    def stream_chief_complaints(self, batch_size: int = 100):
+    def stream_patient_migration_records(self, batch_size: int = 20, limit: Optional[int] = None):
         """
-        Extract patient chief complaints from 'temp_migrations.patient_chiefcomplains_data'.
-        Each row is unique by (Case No, Visit Date).
-        Yields batches of dicts: [{"caseNo": int, "visitDate": str, "chiefComplaint": str}].
+        Extract unified patient records by joining demographic, encounter, diagnosis,
+        prescription, chief complaint, and investigation data from PostgreSQL temp_migrations schema.
+        Yields batches of dicts in chunks of batch_size (default 20).
         """
-        query = text("""
-            SELECT
-                pcd."Case No",
-                pcd."Visit Date",
-                pcd."Chief Complaints"
+        query_str = """
+        WITH p_info AS (
+            SELECT pd."case No", pd."Gender", pd."Age Day", pd."Age Month", pd."Age Year" 
+            FROM temp_migrations.patient_data pd
+        ), 
+        p_cc AS (
+            SELECT pcd."Case No", pcd."Visit Date", pcd."Chief Complaints" 
             FROM temp_migrations.patient_chiefcomplains_data pcd
-            WHERE pcd."Chief Complaints" IS NOT NULL
-              AND TRIM(pcd."Chief Complaints") != ''
-            ORDER BY pcd."Case No"
-        """)
-
-        def _parse_case_no(val: Optional[str]) -> Any:
-            if val is None:
-                return 0
-            if isinstance(val, int):
-                return val
-            s_val = str(val).strip()
-            if s_val.isdigit():
-                return int(s_val)
-            digits = "".join(filter(str.isdigit, s_val))
-            if digits:
-                return int(digits)
-            return s_val
-
-        with self.engine.connect() as conn:
-            result = conn.execution_options(yield_per=batch_size).execute(query)
-            while True:
-                rows = result.fetchmany(batch_size)
-                if not rows:
-                    break
-                batch = []
-                for row in rows:
-                    raw_case_no, visit_date, chief_complaint = row[0], row[1], row[2]
-                    case_no = _parse_case_no(raw_case_no)
-                    batch.append({
-                        "caseNo": case_no,
-                        "visitDate": visit_date,
-                        "chiefComplaint": chief_complaint or "",
-                    })
-                logger.info("Fetched batch of %d chief complaint rows from PostgreSQL", len(batch))
-                yield batch
-
-    def get_chief_complaints_count(self) -> int:
-        """Get total row count for chief complaints data in PostgreSQL."""
-        query = text("""
-            SELECT COUNT(*)
-            FROM temp_migrations.patient_chiefcomplains_data pcd
-            WHERE pcd."Chief Complaints" IS NOT NULL
-              AND TRIM(pcd."Chief Complaints") != ''
-        """)
-        with self.engine.connect() as conn:
-            return conn.execute(query).scalar() or 0
-
-    def stream_patient_prescriptions(self, batch_size: int = 1000):
+        ), 
+        p_dx AS (
+            SELECT pdd."Case No", pdd."Visit Date", string_agg(pdd."Diagnosis Name", ', ') AS "Diagnosis Names"  
+            FROM temp_migrations.patient_diagnosis_data pdd
+            GROUP BY pdd."Case No", pdd."Visit Date"
+        ), 
+        p_vr AS (
+            SELECT pvd."Case No", pvd."Visit Date", pvd."Visit Reason"  
+            FROM temp_migrations.patient_visit_data pvd
+        ), 
+        p_rx AS (
+            SELECT ppd."Case No", ppd."Visit Date", string_agg(ppd."Medicine Name", ', ') AS "Medicine Names"  
+            FROM temp_migrations.patient_prescription_data ppd
+            GROUP BY ppd."Case No", ppd."Visit Date"
+        ),
+        p_inv AS (
+            SELECT pid."CaseNo", pid."Visit Date", string_agg(pid."Investigation Name", ', ') AS "Investigation Names"
+            FROM temp_migrations.patient_investigation_data pid
+            GROUP BY pid."CaseNo", pid."Visit Date"
+        )
+        SELECT 
+            p_vr."Case No",
+            p_vr."Visit Date",
+            p_info."Gender",
+            p_info."Age Day",
+            p_info."Age Month",
+            p_info."Age Year",
+            p_cc."Chief Complaints",
+            p_vr."Visit Reason",
+            p_dx."Diagnosis Names",
+            p_rx."Medicine Names",
+            p_inv."Investigation Names",
+            row_number() OVER (PARTITION BY p_vr."Case No" ORDER BY p_vr."Visit Date" DESC) AS "Is Latest"
+        FROM p_vr
+        LEFT JOIN p_info ON p_vr."Case No" = p_info."case No"
+        LEFT JOIN p_cc ON p_vr."Case No" = p_cc."Case No" AND p_vr."Visit Date" = p_cc."Visit Date"
+        LEFT JOIN p_dx ON p_vr."Case No" = p_dx."Case No" AND p_vr."Visit Date" = p_dx."Visit Date"
+        LEFT JOIN p_rx ON p_vr."Case No" = p_rx."Case No" AND p_vr."Visit Date" = p_rx."Visit Date"
+        LEFT JOIN p_inv ON p_vr."Case No" = p_inv."CaseNo" AND p_vr."Visit Date" = p_inv."Visit Date"
+        ORDER BY p_vr."Case No"
         """
-        Extract patient prescription data grouped by Case No and Visit Date from 'temp_migrations.patient_prescription_data'.
-        Aggregates medicine names into an array per encounter.
-        Yields list of dicts for each batch: [{"caseNo": int/str, "visitDate": str, "medications": list[str]}].
-        """
-        query = text("""
-            SELECT 
-                ppd."Case No", 
-                ppd."Visit Date", 
-                ARRAY_AGG(ppd."Medicine Name") AS medications 
-            FROM temp_migrations.patient_prescription_data ppd 
-            GROUP BY ppd."Case No", ppd."Visit Date" 
-            ORDER BY "Case No"
-        """)
-
-        def _parse_case_no(val: Optional[str]) -> Any:
-            if val is None:
-                return 0
-            if isinstance(val, int):
-                return val
-            s_val = str(val).strip()
-            if s_val.isdigit():
-                return int(s_val)
-            digits = "".join(filter(str.isdigit, s_val))
-            if digits:
-                return int(digits)
-            return s_val
-
-        with self.engine.connect() as conn:
-            result = conn.execution_options(yield_per=batch_size).execute(query)
-            while True:
-                rows = result.fetchmany(batch_size)
-                if not rows:
-                    break
-                batch = []
-                for row in rows:
-                    raw_case_no, visit_date, medications = row[0], row[1], row[2]
-                    case_no = _parse_case_no(raw_case_no)
-                    med_list = [m for m in (medications or []) if m is not None]
-                    batch.append({
-                        "caseNo": case_no,
-                        "visitDate": visit_date,
-                        "medications": med_list,
-                    })
-                logger.info("Fetched batch of %d grouped prescription records from PostgreSQL", len(batch))
-                yield batch
-
-    def get_patient_prescriptions_count(self) -> int:
-        """Get total grouped encounter count for patient prescription data in PostgreSQL."""
-        query = text("""
-            SELECT COUNT(*) FROM (
-                SELECT 1
-                FROM temp_migrations.patient_prescription_data ppd
-                GROUP BY ppd."Case No", ppd."Visit Date"
-            ) sub
-        """)
-        with self.engine.connect() as conn:
-            return conn.execute(query).scalar() or 0
-
-    def stream_patient_demographics(self, batch_size: int = 1000):
-        """
-        Extract patient demographics from 'temp_migrations.patient_data'.
-        Yields list of dicts for each batch:
-        [{"caseNo": int/str, "patientInfo": {"age": float, "gender": "m" | "f"}}].
-        """
-        query = text("""
-            SELECT 
-                pd."case No", 
-                pd."Gender", 
-                pd."Age Day", 
-                pd."Age Month", 
-                pd."Age Year" 
-            FROM temp_migrations.patient_data pd 
-            ORDER BY "case No"
-        """)
+        if limit is not None and limit > 0:
+            query_str += f" LIMIT {int(limit)}"
 
         def _parse_case_no(val: Optional[str]) -> Any:
             if val is None:
@@ -355,6 +170,7 @@ class PostgresSource:
                 return "f"
             return "m"
 
+        query = text(query_str)
         with self.engine.connect() as conn:
             result = conn.execution_options(yield_per=batch_size).execute(query)
             while True:
@@ -363,25 +179,37 @@ class PostgresSource:
                     break
                 batch = []
                 for row in rows:
-                    raw_case_no, gender, age_day, age_month, age_year = row[0], row[1], row[2], row[3], row[4]
-                    case_no = _parse_case_no(raw_case_no)
+                    case_no = _parse_case_no(row[0])
+                    visit_date = str(row[1]) if row[1] is not None else ""
+                    gender = _parse_gender(row[2])
+                    age_day = row[3]
+                    age_month = row[4]
+                    age_year = row[5]
                     age = _parse_age(age_year, age_month, age_day)
-                    g = _parse_gender(gender)
+                    chief_complaints = row[6]
+                    visit_reason = row[7]
+                    diagnosis_names = row[8]
+                    medicine_names = row[9]
+                    investigation_names = row[10]
+                    is_latest = int(row[11]) if row[11] is not None else 1
+
                     batch.append({
                         "caseNo": case_no,
-                        "patientInfo": {
-                            "age": age,
-                            "gender": g,
-                        }
+                        "visitDate": visit_date,
+                        "gender": gender,
+                        "ageDay": age_day,
+                        "ageMonth": age_month,
+                        "ageYear": age_year,
+                        "age": age,
+                        "chiefComplaints": chief_complaints,
+                        "visitReason": visit_reason,
+                        "diagnosisNames": diagnosis_names,
+                        "medicineNames": medicine_names,
+                        "investigationNames": investigation_names,
+                        "isLatest": is_latest,
                     })
-                logger.info("Fetched batch of %d patient demographic records from PostgreSQL", len(batch))
+                logger.info("Fetched batch of %d unified patient migration records from PostgreSQL", len(batch))
                 yield batch
-
-    def get_patient_demographics_count(self) -> int:
-        """Get total record count for patient demographics data in PostgreSQL."""
-        query = text('SELECT COUNT(*) FROM temp_migrations.patient_data')
-        with self.engine.connect() as conn:
-            return conn.execute(query).scalar() or 0
 
     def close(self) -> None:
         """Dispose of the connection pool."""

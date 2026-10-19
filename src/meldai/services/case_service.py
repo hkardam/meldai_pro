@@ -358,7 +358,7 @@ class CaseService:
             for cand in candidates:
                 # Extract candidate symptoms with native int hpoCode
                 cand_symptoms: List[EntityItem] = []
-                for s in cand.get("symptoms", []):
+                for s in (cand.get("chiefComplaints") or cand.get("symptoms") or []):
                     if isinstance(s, dict):
                         cand_symptoms.append(
                             EntityItem(

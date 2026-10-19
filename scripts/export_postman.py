@@ -412,26 +412,26 @@ def build_postman_collection() -> Dict[str, Any]:
         }
     )
 
-    # 4. Patient Visit Migration
+    # 4. Unified Patient Migration (Synchronous)
     folders["Data Migration & Sync"].append(
         {
-            "name": "Migrate Patient Visits (PostgreSQL -> MongoDB)",
+            "name": "Migrate Patients (PostgreSQL -> Decorate -> MongoDB)",
             "request": {
                 "method": "POST",
                 "header": [{"key": "Accept", "value": "application/json", "type": "text"}],
                 "url": {
-                    "raw": "{{base_url}}/api/v1/cases/migrate-patient-visits?batch_size=1000",
+                    "raw": "{{base_url}}/api/v1/cases/migrate?batch_size=20",
                     "host": ["{{base_url}}"],
-                    "path": ["api", "v1", "cases", "migrate-patient-visits"],
+                    "path": ["api", "v1", "cases", "migrate"],
                     "query": [
                         {
                             "key": "batch_size",
-                            "value": "1000",
-                            "description": "Batch size for extracting and pushing records",
+                            "value": "20",
+                            "description": "Batch size for extracting, decorating, and saving records (default: 20)",
                         }
                     ],
                 },
-                "description": "Pull patient visit data from PostgreSQL (temp_migrations.patient_visit_data) in batches of 1000 and upsert into MongoDB 'cases' collection with unique (caseNo, visitDate) index.",
+                "description": "Execute unified patient migration logical flow: start -> query docs from psql -> decorate -> save to mongodb -> extended. Repeated in batches of 20.",
             },
             "response": [
                 {
@@ -439,9 +439,9 @@ def build_postman_collection() -> Dict[str, Any]:
                     "originalRequest": {
                         "method": "POST",
                         "url": {
-                            "raw": "{{base_url}}/api/v1/cases/migrate-patient-visits?batch_size=1000",
+                            "raw": "{{base_url}}/api/v1/cases/migrate?batch_size=20",
                             "host": ["{{base_url}}"],
-                            "path": ["api", "v1", "cases", "migrate-patient-visits"],
+                            "path": ["api", "v1", "cases", "migrate"],
                         },
                     },
                     "status": "OK",
@@ -451,12 +451,13 @@ def build_postman_collection() -> Dict[str, Any]:
                     "body": json.dumps(
                         {
                             "status": "success",
-                            "batch_size": 1000,
+                            "batch_size": 20,
                             "total_records_processed": 1386,
-                            "batches_processed": 2,
+                            "batches_processed": 70,
                             "upserted_count": 1386,
                             "modified_count": 0,
                             "matched_count": 0,
+                            "execution_time_seconds": 12.45,
                         },
                         indent=2,
                     ),
@@ -465,80 +466,26 @@ def build_postman_collection() -> Dict[str, Any]:
         }
     )
 
-    # 5. Patient Diagnosis Migration
+    # 5. Unified Patient Migration (Background Runner)
     folders["Data Migration & Sync"].append(
         {
-            "name": "Migrate Patient Diagnoses (PostgreSQL -> MongoDB)",
+            "name": "Start Migrate Patients (Background)",
             "request": {
                 "method": "POST",
                 "header": [{"key": "Accept", "value": "application/json", "type": "text"}],
                 "url": {
-                    "raw": "{{base_url}}/api/v1/cases/migrate-patient-diagnoses?batch_size=1000",
+                    "raw": "{{base_url}}/api/v1/cases/migrate/start?batch_size=20",
                     "host": ["{{base_url}}"],
-                    "path": ["api", "v1", "cases", "migrate-patient-diagnoses"],
+                    "path": ["api", "v1", "cases", "migrate", "start"],
                     "query": [
                         {
                             "key": "batch_size",
-                            "value": "1000",
-                            "description": "Batch size for extracting and pushing diagnosis records",
+                            "value": "20",
+                            "description": "Batch size for background patient migration (default: 20)",
                         }
                     ],
                 },
-                "description": "Pull grouped patient diagnosis data from PostgreSQL (temp_migrations.patient_diagnosis_data) using ARRAY_AGG(DISTINCT 'Diagnosis Name'), resolve MONDO codes and SapBERT embeddings, and replace the 'diagnosis' array on matching MongoDB 'cases' documents.",
-            },
-            "response": [
-                {
-                    "name": "200 OK",
-                    "originalRequest": {
-                        "method": "POST",
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/cases/migrate-patient-diagnoses?batch_size=1000",
-                            "host": ["{{base_url}}"],
-                            "path": ["api", "v1", "cases", "migrate-patient-diagnoses"],
-                        },
-                    },
-                    "status": "OK",
-                    "code": 200,
-                    "_postman_previewlanguage": "json",
-                    "header": [{"key": "Content-Type", "value": "application/json"}],
-                    "body": json.dumps(
-                        {
-                            "status": "success",
-                            "batch_size": 1000,
-                            "total_encounters_processed": 523,
-                            "batches_processed": 1,
-                            "modified_count": 523,
-                            "matched_count": 523,
-                            "unique_terms_indexed": 57,
-                            "execution_time_seconds": 1.452,
-                        },
-                        indent=2,
-                    ),
-                }
-            ],
-        }
-    )
-
-    # 6. Patient Chief Complaints Migration (Background Runner)
-    folders["Data Migration & Sync"].append(
-        {
-            "name": "Start Migrate Patient Chief Complaints (Background)",
-            "request": {
-                "method": "POST",
-                "header": [{"key": "Accept", "value": "application/json", "type": "text"}],
-                "url": {
-                    "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/start?batch_size=100",
-                    "host": ["{{base_url}}"],
-                    "path": ["api", "v1", "cases", "migrate-patient-chief-complaints", "start"],
-                    "query": [
-                        {
-                            "key": "batch_size",
-                            "value": "100",
-                            "description": "Batch size for extracting and pushing records in the background",
-                        }
-                    ],
-                },
-                "description": "Trigger the asynchronous background migration worker for patient chief complaints.",
+                "description": "Trigger the asynchronous background migration worker for patient records in batches of 20.",
             },
             "response": [
                 {
@@ -546,9 +493,9 @@ def build_postman_collection() -> Dict[str, Any]:
                     "originalRequest": {
                         "method": "POST",
                         "url": {
-                            "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/start?batch_size=100",
+                            "raw": "{{base_url}}/api/v1/cases/migrate/start?batch_size=20",
                             "host": ["{{base_url}}"],
-                            "path": ["api", "v1", "cases", "migrate-patient-chief-complaints", "start"],
+                            "path": ["api", "v1", "cases", "migrate", "start"],
                         },
                     },
                     "status": "OK",
@@ -558,8 +505,8 @@ def build_postman_collection() -> Dict[str, Any]:
                     "body": json.dumps(
                         {
                             "status": "started",
-                            "message": "Chief complaints migration started in background.",
-                            "batch_size": 100,
+                            "message": "Patient migration started in background.",
+                            "batch_size": 20,
                         },
                         indent=2,
                     ),
@@ -570,16 +517,16 @@ def build_postman_collection() -> Dict[str, Any]:
 
     folders["Data Migration & Sync"].append(
         {
-            "name": "Stop Migrate Patient Chief Complaints",
+            "name": "Stop Migrate Patients",
             "request": {
                 "method": "POST",
                 "header": [{"key": "Accept", "value": "application/json", "type": "text"}],
                 "url": {
-                    "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/stop",
+                    "raw": "{{base_url}}/api/v1/cases/migrate/stop",
                     "host": ["{{base_url}}"],
-                    "path": ["api", "v1", "cases", "migrate-patient-chief-complaints", "stop"],
+                    "path": ["api", "v1", "cases", "migrate", "stop"],
                 },
-                "description": "Send graceful cancellation signal to halt chief complaints background migration.",
+                "description": "Send graceful cancellation signal to halt patient background migration.",
             },
             "response": [
                 {
@@ -587,9 +534,9 @@ def build_postman_collection() -> Dict[str, Any]:
                     "originalRequest": {
                         "method": "POST",
                         "url": {
-                            "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/stop",
+                            "raw": "{{base_url}}/api/v1/cases/migrate/stop",
                             "host": ["{{base_url}}"],
-                            "path": ["api", "v1", "cases", "migrate-patient-chief-complaints", "stop"],
+                            "path": ["api", "v1", "cases", "migrate", "stop"],
                         },
                     },
                     "status": "OK",
@@ -610,16 +557,16 @@ def build_postman_collection() -> Dict[str, Any]:
 
     folders["Data Migration & Sync"].append(
         {
-            "name": "Get Migrate Patient Chief Complaints Status",
+            "name": "Get Migrate Patients Status",
             "request": {
                 "method": "GET",
                 "header": [{"key": "Accept", "value": "application/json", "type": "text"}],
                 "url": {
-                    "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/status",
+                    "raw": "{{base_url}}/api/v1/cases/migrate/status",
                     "host": ["{{base_url}}"],
-                    "path": ["api", "v1", "cases", "migrate-patient-chief-complaints", "status"],
+                    "path": ["api", "v1", "cases", "migrate", "status"],
                 },
-                "description": "Poll the active run status and progress metrics of the chief complaints migration.",
+                "description": "Poll the active run status, current step, and progress metrics of patient migration.",
             },
             "response": [
                 {
@@ -627,9 +574,9 @@ def build_postman_collection() -> Dict[str, Any]:
                     "originalRequest": {
                         "method": "GET",
                         "url": {
-                            "raw": "{{base_url}}/api/v1/cases/migrate-patient-chief-complaints/status",
+                            "raw": "{{base_url}}/api/v1/cases/migrate/status",
                             "host": ["{{base_url}}"],
-                            "path": ["api", "v1", "cases", "migrate-patient-chief-complaints", "status"],
+                            "path": ["api", "v1", "cases", "migrate", "status"],
                         },
                     },
                     "status": "OK",
@@ -639,13 +586,12 @@ def build_postman_collection() -> Dict[str, Any]:
                     "body": json.dumps(
                         {
                             "status": "running",
-                            "batch_size": 100,
-                            "current_batch": 3,
-                            "total_batches": 10,
-                            "total_rows_processed": 300,
-                            "documents_updated": 290,
-                            "documents_skipped": 10,
-                            "current_step": "batch_3_completed",
+                            "batch_size": 20,
+                            "current_batch": 5,
+                            "total_batches": 70,
+                            "total_records_processed": 100,
+                            "documents_saved": 100,
+                            "current_step": "extended",
                             "start_time": 1728120000.0,
                             "elapsed_seconds": 3.8,
                             "error": None,

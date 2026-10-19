@@ -55,66 +55,43 @@ class BatchSymptomMatchResponse(BaseModel):
     matches: List[SymptomMatchResult]
 
 
-class PatientVisitMigrationResponse(BaseModel):
-    status: str
-    batch_size: int
+class PatientMigrationResponse(BaseModel):
+    status: str = Field(default="success")
+    batch_size: int = Field(default=20)
     total_records_processed: int
     batches_processed: int
     upserted_count: int
     modified_count: int
     matched_count: int
-
-
-class PatientDiagnosisMigrationResponse(BaseModel):
-    status: str
-    batch_size: int
-    total_encounters_processed: int
-    batches_processed: int
-    modified_count: int
-    matched_count: int
-    unique_terms_indexed: int
     execution_time_seconds: float
 
 
-class PatientMedicationMigrationResponse(BaseModel):
-    status: str
-    batch_size: int
-    total_encounters_processed: int
-    batches_processed: int
-    modified_count: int
-    matched_count: int
-    execution_time_seconds: float
-
-
-class PatientDemographicsMigrationResponse(BaseModel):
-    status: str
-    batch_size: int
-    total_records_processed: int
-    batches_processed: int
-    modified_count: int
-    matched_count: int
-    execution_time_seconds: float
-
-
-
-class ChiefComplaintsRunStatusResponse(BaseModel):
+class PatientMigrationStatusResponse(BaseModel):
     status: str
     batch_size: int
     current_batch: int
     total_batches: int
-    total_rows_processed: int
-    documents_updated: int
-    documents_skipped: int
+    total_records_processed: int
+    documents_saved: int
     current_step: str
     start_time: Optional[float] = None
     elapsed_seconds: float
     error: Optional[str] = None
 
 
-class ChiefComplaintsActionResponse(BaseModel):
+class PatientMigrationActionResponse(BaseModel):
     status: str
     message: str
     batch_size: Optional[int] = None
+
+
+# Backward-compatible aliases
+PatientVisitMigrationResponse = PatientMigrationResponse
+PatientDiagnosisMigrationResponse = PatientMigrationResponse
+PatientMedicationMigrationResponse = PatientMigrationResponse
+PatientDemographicsMigrationResponse = PatientMigrationResponse
+ChiefComplaintsRunStatusResponse = PatientMigrationStatusResponse
+ChiefComplaintsActionResponse = PatientMigrationActionResponse
 
 
 class DecoratedSymptomItem(BaseModel):

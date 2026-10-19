@@ -226,6 +226,40 @@ class MongoKnowledgeBase:
         """Retrieve a specific case by caseNo."""
         return self.cases.find_one({"caseNo": case_no}, {"_id": 0})
 
+    def upsert_patient_cases_batch(self, cases: List[Dict[str, Any]]) -> Dict[str, int]:
+        """
+        Bulk upsert decorated patient case documents in MongoDB 'cases' collection.
+        Uses compound key (caseNo, visitDate) to update existing cases or insert new ones.
+        """
+        if not cases:
+            return {"upserted_count": 0, "modified_count": 0, "matched_count": 0}
+
+        operations = []
+        for case in cases:
+            case_no = case.get("caseNo")
+            visit_date = case.get("visitDate")
+            filter_doc = {"caseNo": case_no, "visitDate": visit_date}
+            update_doc = {
+                "$set": case,
+                "$setOnInsert": {
+                    "_id": str(uuid.uuid4())
+                },
+            }
+            operations.append(UpdateOne(filter_doc, update_doc, upsert=True))
+
+        result = self.cases.bulk_write(operations, ordered=False)
+        logger.info(
+            "Unified patient cases batch bulk_write: upserted=%d, modified=%d, matched=%d",
+            result.upserted_count,
+            result.modified_count,
+            result.matched_count,
+        )
+        return {
+            "upserted_count": result.upserted_count,
+            "modified_count": result.modified_count,
+            "matched_count": result.matched_count,
+        }
+
     def upsert_patient_visits_batch(self, records: List[Dict[str, Any]]) -> Dict[str, int]:
         """
         Bulk upsert/patch patient visit case documents in MongoDB.

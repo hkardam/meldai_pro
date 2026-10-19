@@ -1,4 +1,4 @@
-"""Background service runner for patient chief complaints migration with start, stop, and status control."""
+"""Background service runner for unified patient migration with start, stop, and status control."""
 
 import logging
 import threading
@@ -10,8 +10,8 @@ from meldai.services.migration_service import MigrationService
 logger = logging.getLogger(__name__)
 
 
-class ChiefComplaintsRunner:
-    """Manages asynchronous execution, cancellation, and status tracking for chief complaints migration."""
+class PatientMigrationRunner:
+    """Manages asynchronous execution, cancellation, and status tracking for patient migration."""
 
     def __init__(self, migration_service: Optional[MigrationService] = None) -> None:
         self._migration_service = migration_service
@@ -21,12 +21,11 @@ class ChiefComplaintsRunner:
 
         self._state: Dict[str, Any] = {
             "status": "idle",  # "idle" | "running" | "stopping" | "completed" | "failed" | "stopped"
-            "batch_size": 100,
+            "batch_size": 20,
             "current_batch": 0,
             "total_batches": 0,
-            "total_rows_processed": 0,
-            "documents_updated": 0,
-            "documents_skipped": 0,
+            "total_records_processed": 0,
+            "documents_saved": 0,
             "current_step": "idle",
             "start_time": None,
             "elapsed_seconds": 0.0,
@@ -46,13 +45,13 @@ class ChiefComplaintsRunner:
                 state["elapsed_seconds"] = round(time.time() - state["start_time"], 2)
             return state
 
-    def start(self, batch_size: int = 100, max_workers: Optional[int] = None) -> Dict[str, Any]:
+    def start(self, batch_size: int = 20, limit: Optional[int] = None) -> Dict[str, Any]:
         """Start migration in a background thread. Returns 409 error if already active."""
         with self._lock:
             if self._state["status"] in ("running", "stopping"):
                 return {
                     "status": "conflict",
-                    "message": f"Migration is already in progress with status '{self._state['status']}'.",
+                    "message": f"Patient migration is already in progress with status '{self._state['status']}'.",
                     "current_state": dict(self._state),
                 }
 
@@ -62,10 +61,9 @@ class ChiefComplaintsRunner:
                 "batch_size": batch_size,
                 "current_batch": 0,
                 "total_batches": 0,
-                "total_rows_processed": 0,
-                "documents_updated": 0,
-                "documents_skipped": 0,
-                "current_step": "initializing",
+                "total_records_processed": 0,
+                "documents_saved": 0,
+                "current_step": "start",
                 "start_time": time.time(),
                 "elapsed_seconds": 0.0,
                 "error": None,
@@ -73,15 +71,15 @@ class ChiefComplaintsRunner:
 
             self._thread = threading.Thread(
                 target=self._execute,
-                args=(batch_size, max_workers),
-                name="ChiefComplaintsMigrationThread",
+                args=(batch_size, limit),
+                name="PatientMigrationThread",
                 daemon=True,
             )
             self._thread.start()
 
             return {
                 "status": "started",
-                "message": "Chief complaints migration started in background.",
+                "message": "Patient migration started in background.",
                 "batch_size": batch_size,
             }
 
@@ -91,7 +89,7 @@ class ChiefComplaintsRunner:
             if self._state["status"] not in ("running",):
                 return {
                     "status": self._state["status"],
-                    "message": f"Cannot stop migration: current status is '{self._state['status']}'.",
+                    "message": f"Cannot stop patient migration: current status is '{self._state['status']}'.",
                 }
 
             self._stop_event.set()
@@ -102,21 +100,20 @@ class ChiefComplaintsRunner:
                 "message": "Stop signal sent. Runner will cleanly halt after finishing current batch.",
             }
 
-    def _execute(self, batch_size: int, max_workers: Optional[int]) -> None:
-        """Worker thread loop executing optimized chief complaints migration."""
+    def _execute(self, batch_size: int, limit: Optional[int]) -> None:
+        """Worker thread loop executing unified patient migration."""
         svc = self._get_migration_service()
         try:
             def _progress_callback(update_dict: Dict[str, Any]) -> bool:
-                # Returns True to continue, False if stop requested
                 with self._lock:
                     self._state.update(update_dict)
                     if self._state["start_time"]:
                         self._state["elapsed_seconds"] = round(time.time() - self._state["start_time"], 2)
                 return not self._stop_event.is_set()
 
-            result = svc.load_chief_complaints(
+            result = svc.run_patient_migration(
                 batch_size=batch_size,
-                max_workers=max_workers,
+                limit=limit,
                 progress_callback=_progress_callback,
             )
 
@@ -127,14 +124,13 @@ class ChiefComplaintsRunner:
                 else:
                     self._state["status"] = "completed"
                     self._state["current_step"] = "completed"
-                self._state["total_rows_processed"] = result.get("total_rows_processed", self._state["total_rows_processed"])
-                self._state["documents_updated"] = result.get("documents_updated", self._state["documents_updated"])
-                self._state["documents_skipped"] = result.get("documents_skipped", self._state["documents_skipped"])
+                self._state["total_records_processed"] = result.get("total_records_processed", self._state["total_records_processed"])
+                self._state["documents_saved"] = result.get("upserted_count", 0) + result.get("modified_count", 0)
                 self._state["current_batch"] = result.get("batches_processed", self._state["current_batch"])
                 if self._state["start_time"]:
                     self._state["elapsed_seconds"] = round(time.time() - self._state["start_time"], 2)
         except Exception as exc:
-            logger.error("Background chief complaints migration failed: %s", exc, exc_info=True)
+            logger.error("Background patient migration failed: %s", exc, exc_info=True)
             with self._lock:
                 self._state["status"] = "failed"
                 self._state["current_step"] = "failed"
@@ -143,15 +139,20 @@ class ChiefComplaintsRunner:
                     self._state["elapsed_seconds"] = round(time.time() - self._state["start_time"], 2)
 
 
-_runner_instance: Optional[ChiefComplaintsRunner] = None
+_runner_instance: Optional[PatientMigrationRunner] = None
 _runner_lock = threading.Lock()
 
 
-def get_chief_complaints_runner() -> ChiefComplaintsRunner:
-    """Return the singleton instance of ChiefComplaintsRunner."""
+def get_patient_migration_runner() -> PatientMigrationRunner:
+    """Return singleton instance of PatientMigrationRunner."""
     global _runner_instance
     if _runner_instance is None:
         with _runner_lock:
             if _runner_instance is None:
-                _runner_instance = ChiefComplaintsRunner()
+                _runner_instance = PatientMigrationRunner()
     return _runner_instance
+
+
+# Backward-compatibility alias
+ChiefComplaintsRunner = PatientMigrationRunner
+get_chief_complaints_runner = get_patient_migration_runner

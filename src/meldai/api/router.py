@@ -18,17 +18,14 @@ from meldai.api.req_dtos import (
 from meldai.api.res_dtos import (
     BatchSymptomMatchResponse,
     BioLORDEmbedResponse,
-    ChiefComplaintsActionResponse,
-    ChiefComplaintsRunStatusResponse,
     EmbedResponse,
     FindSimilarCaseResponse,
     LoadMedicineMasterResponse,
     MedicationSearchQueryResponse,
     MedicineSearchResponse,
-    PatientDemographicsMigrationResponse,
-    PatientDiagnosisMigrationResponse,
-    PatientMedicationMigrationResponse,
-    PatientVisitMigrationResponse,
+    PatientMigrationActionResponse,
+    PatientMigrationResponse,
+    PatientMigrationStatusResponse,
     PrescribeMedicationsResponse,
     PrescribePipelineActionResponse,
     PrescribePipelineStatusResponse,
@@ -45,7 +42,7 @@ from meldai.nlp.medspacy_nlp import get_medspacy_service
 from meldai.nlp.sapbert import get_sapbert_embedder
 from meldai.services.assertion_service import ClinicalAssertionService
 from meldai.services.case_service import CaseService
-from meldai.services.chief_complaints_runner import get_chief_complaints_runner
+from meldai.services.chief_complaints_runner import get_patient_migration_runner
 from meldai.services.prescribe_pipeline_runner import get_prescribe_pipeline_runner
 from meldai.services.gemini_service import get_gemini_service
 from meldai.services.medicine_master_service import MedicineMasterService
@@ -119,12 +116,18 @@ def _get_migration_service() -> MigrationService:
     settings = get_settings()
     pg = PostgresSource(settings)
     mongo = MongoKnowledgeBase(settings)
-    symptom_svc = _get_symptom_service()
+    assertion = ClinicalAssertionService()
+    hpo = get_hpo_service(settings.hpo_obo_path)
+    mondo = get_mondo_service(settings.mondo_obo_path)
+    embedder = get_sapbert_embedder(settings)
     return MigrationService(
         settings=settings,
         postgres_source=pg,
         mongo_kb=mongo,
-        symptom_service=symptom_svc,
+        assertion_service=assertion,
+        hpo_service=hpo,
+        mondo_service=mondo,
+        embedder=embedder,
     )
 
 
@@ -283,150 +286,70 @@ def segment_symptoms(payload: SegmentSymptomsRequest) -> SegmentSymptomsResponse
 
 
 # ---------------------------------------------------------------------------
-# Patient Visit Migration (PostgreSQL -> MongoDB)
+# Unified Patient Migration (PostgreSQL -> Decorate -> MongoDB)
 # ---------------------------------------------------------------------------
 
-@api_router.post("/cases/migrate-patient-visits", response_model=PatientVisitMigrationResponse)
-def migrate_patient_visits(
-    batch_size: int = Query(1000, ge=1, le=10000, description="Batch size for extracting and pushing records"),
-) -> PatientVisitMigrationResponse:
-    """Stream patient visits from PostgreSQL and upsert/patch into MongoDB 'cases' collection."""
-    try:
-        migration_svc = _get_migration_service()
-        result = migration_svc.migrate_patient_visits(batch_size=batch_size)
-        return PatientVisitMigrationResponse(**result)
-    except Exception as exc:
-        logger.error("Patient visit migration failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Patient visit migration failed: {str(exc)}")
-
-
-# ---------------------------------------------------------------------------
-# Patient Diagnosis Migration (PostgreSQL -> MongoDB)
-# ---------------------------------------------------------------------------
-
-@api_router.post("/cases/migrate-patient-diagnoses", response_model=PatientDiagnosisMigrationResponse)
-def migrate_patient_diagnoses(
-    batch_size: int = Query(1000, ge=1, le=10000, description="Batch size for extracting and pushing records"),
-) -> PatientDiagnosisMigrationResponse:
-    """Stream grouped patient diagnoses from PostgreSQL, resolve embeddings, and patch MongoDB documents.
-
-    Non-destructive patching:
-    Patches only the 'diagnosis' field using MongoDB $set operator, preserving existing
-    fields (like 'symptoms' and 'visitReason').
+@api_router.post(
+    "/cases/migrate",
+    response_model=PatientMigrationResponse,
+    summary="Run synchronous patient migration in batches of 20",
+)
+def migrate_patients(
+    batch_size: int = Query(20, ge=1, le=1000, description="Batch size for processing records (default: 20)"),
+    limit: Optional[int] = Query(None, ge=1, description="Optional maximum number of records to migrate"),
+) -> PatientMigrationResponse:
+    """Execute the clinical patient migration logical flow:
+    start -> query docs from psql -> decorate -> save to mongodb -> extended
+    Repeated in batches of 20 (or specified batch size).
     """
     try:
         migration_svc = _get_migration_service()
-        result = migration_svc.migrate_patient_diagnoses(batch_size=batch_size)
-        return PatientDiagnosisMigrationResponse(**result)
+        result = migration_svc.run_patient_migration(batch_size=batch_size, limit=limit)
+        return PatientMigrationResponse(**result)
     except Exception as exc:
-        logger.error("Patient diagnosis migration failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Patient diagnosis migration failed: {str(exc)}")
-
-
-# ---------------------------------------------------------------------------
-# Patient Medication/Prescription Migration (PostgreSQL -> MongoDB)
-# ---------------------------------------------------------------------------
-
-@api_router.post("/cases/migrate-patient-prescriptions", response_model=PatientMedicationMigrationResponse)
-def migrate_patient_prescriptions(
-    batch_size: int = Query(1000, ge=1, le=10000, description="Batch size for extracting and pushing records"),
-) -> PatientMedicationMigrationResponse:
-    """Stream grouped patient prescription/medication data from PostgreSQL and patch MongoDB case documents.
-
-    Non-destructive patching:
-    Patches only the 'medications' field (list of medicine names) using MongoDB $set operator,
-    matching documents on compound key (caseNo + visitDate).
-    """
-    try:
-        migration_svc = _get_migration_service()
-        result = migration_svc.migrate_patient_prescriptions(batch_size=batch_size)
-        return PatientMedicationMigrationResponse(**result)
-    except Exception as exc:
-        logger.error("Patient prescription migration failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Patient prescription migration failed: {str(exc)}")
-
-
-# ---------------------------------------------------------------------------
-# Patient Demographics Migration (PostgreSQL -> MongoDB)
-# ---------------------------------------------------------------------------
-
-@api_router.post("/cases/migrate-patient-demographics", response_model=PatientDemographicsMigrationResponse)
-def migrate_patient_demographics(
-    batch_size: int = Query(1000, ge=1, le=10000, description="Batch size for extracting and pushing records"),
-) -> PatientDemographicsMigrationResponse:
-    """Stream patient demographic data from PostgreSQL and patch MongoDB case documents with patientInfo field.
-
-    Non-destructive patching:
-    Patches only the 'patientInfo' field ({age: float, gender: 'm' | 'f'}) using MongoDB $set operator,
-    matching case documents on 'caseNo'.
-    """
-    try:
-        migration_svc = _get_migration_service()
-        result = migration_svc.migrate_patient_demographics(batch_size=batch_size)
-        return PatientDemographicsMigrationResponse(**result)
-    except Exception as exc:
-        logger.error("Patient demographics migration failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Patient demographics migration failed: {str(exc)}")
-
-
-
-
-# ---------------------------------------------------------------------------
-# Patient Chief Complaints Migration (PostgreSQL -> MongoDB - Background Runner)
-# ---------------------------------------------------------------------------
-
+        logger.error("Patient migration failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Patient migration failed: {str(exc)}")
 
 
 @api_router.post(
-    "/cases/migrate-patient-chief-complaints",
+    "/cases/migrate/start",
+    response_model=PatientMigrationActionResponse,
+    summary="Start asynchronous patient migration in background thread",
 )
-def migrate_patient_chief_complaints(
-    batch_size: int = Query(100, ge=1, le=10000, description="Batch size for extracting and pushing records"),
-) -> Dict[str, Any]:
-    """Synchronous migration of patient chief complaints from PostgreSQL to MongoDB."""
-    try:
-        migration_svc = _get_migration_service()
-        return migration_svc.migrate_patient_chief_complaints(batch_size=batch_size)
-    except Exception as exc:
-        logger.error("Patient chief complaints migration failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Patient chief complaints migration failed: {str(exc)}")
-
-
-@api_router.post(
-    "/cases/migrate-patient-chief-complaints/start",
-    response_model=ChiefComplaintsActionResponse,
-)
-def start_migrate_patient_chief_complaints(
-    batch_size: int = Query(100, ge=1, le=10000, description="Batch size for extracting and pushing records"),
-) -> ChiefComplaintsActionResponse:
-    """Start asynchronous background migration of patient chief complaints."""
-    runner = get_chief_complaints_runner()
-    res = runner.start(batch_size=batch_size)
+def start_migrate_patients(
+    batch_size: int = Query(20, ge=1, le=1000, description="Batch size for processing records (default: 20)"),
+    limit: Optional[int] = Query(None, ge=1, description="Optional maximum number of records to migrate"),
+) -> PatientMigrationActionResponse:
+    """Start asynchronous background execution of the patient migration pipeline."""
+    runner = get_patient_migration_runner()
+    res = runner.start(batch_size=batch_size, limit=limit)
     if res.get("status") == "conflict":
         raise HTTPException(status_code=409, detail=res["message"])
-    return ChiefComplaintsActionResponse(**res)
+    return PatientMigrationActionResponse(**res)
 
 
 @api_router.post(
-    "/cases/migrate-patient-chief-complaints/stop",
-    response_model=ChiefComplaintsActionResponse,
+    "/cases/migrate/stop",
+    response_model=PatientMigrationActionResponse,
+    summary="Stop active patient migration pipeline",
 )
-def stop_migrate_patient_chief_complaints() -> ChiefComplaintsActionResponse:
-    """Request graceful stop of the active chief complaints migration runner."""
-    runner = get_chief_complaints_runner()
+def stop_migrate_patients() -> PatientMigrationActionResponse:
+    """Request graceful stop of the active patient migration runner."""
+    runner = get_patient_migration_runner()
     res = runner.stop()
-    return ChiefComplaintsActionResponse(**res)
+    return PatientMigrationActionResponse(**res)
 
 
 @api_router.get(
-    "/cases/migrate-patient-chief-complaints/status",
-    response_model=ChiefComplaintsRunStatusResponse,
+    "/cases/migrate/status",
+    response_model=PatientMigrationStatusResponse,
+    summary="Get status and metrics of patient migration runner",
 )
-def get_migrate_patient_chief_complaints_status() -> ChiefComplaintsRunStatusResponse:
-    """Get the current run status and metrics of the chief complaints migration."""
-    runner = get_chief_complaints_runner()
+def get_migrate_patients_status() -> PatientMigrationStatusResponse:
+    """Get the current run status, progress, and step metrics of the patient migration."""
+    runner = get_patient_migration_runner()
     status = runner.get_status()
-    return ChiefComplaintsRunStatusResponse(**status)
+    return PatientMigrationStatusResponse(**status)
 
 
 # ---------------------------------------------------------------------------

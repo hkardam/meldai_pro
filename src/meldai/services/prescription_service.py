@@ -58,8 +58,10 @@ def _extract_medications(case_doc: dict[str, Any]) -> list[str]:
         for m in meds:
             if isinstance(m, str) and m.strip():
                 clean_meds.append(m.strip())
-            elif isinstance(m, dict) and "name" in m:
-                clean_meds.append(str(m["name"]).strip())
+            elif isinstance(m, dict):
+                val = m.get("term") or m.get("original_term") or m.get("brand_name") or m.get("name")
+                if val:
+                    clean_meds.append(str(val).strip())
         return clean_meds
     elif isinstance(meds, str) and meds.strip():
         return [meds.strip()]
@@ -198,7 +200,7 @@ class PrescriptionService:
                         diag_list.append(d)
 
                 sym_list = []
-                for s in past.get("symptoms", []):
+                for s in (past.get("chiefComplaints") or past.get("symptoms") or []):
                     if isinstance(s, dict):
                         s_term = s.get("term") or s.get("text") or s.get("note")
                         s_code = s.get("hpoCode") or s.get("hpoId")
@@ -249,7 +251,7 @@ class PrescriptionService:
                         diag_list.append(d)
 
                 sym_list = []
-                for s in cand.get("symptoms", []):
+                for s in (cand.get("chiefComplaints") or cand.get("symptoms") or []):
                     if isinstance(s, dict):
                         s_term = s.get("term") or s.get("text") or s.get("note")
                         s_code = s.get("hpoCode") or s.get("hpoId")

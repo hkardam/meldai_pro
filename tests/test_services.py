@@ -1,5 +1,6 @@
 """Unit tests for MeldAI service layer and non-destructive MongoDB patching."""
 
+import time
 from unittest.mock import MagicMock
 import numpy as np
 import pytest
@@ -171,180 +172,162 @@ def test_symptom_service_resolve_symptom():
 
 
 # ---------------------------------------------------------------------------
-# 4. MigrationService & Non-Destructive Patching tests
+# 4. Unified MigrationService & Logical Flow tests
 # ---------------------------------------------------------------------------
 
-def test_migration_service_preserves_diagnosis_and_other_fields():
-    """Verify that loading chief complaints patches $set: {'symptoms': ...}
-
-    and DOES NOT remove 'diagnosis', 'visitReason', or any existing fields.
+def test_patient_migration_flow_and_decoration():
+    """Verify the logical flow:
+    start -> query docs from psql -> decorate -> save to mongodb -> extended
+    and the symptom, diagnosis, and medicine decorations.
     """
     mock_pg = MagicMock()
-    mock_pg.stream_patient_chief_complaints.return_value = [
+    mock_pg.get_patient_migration_count.return_value = 1
+    mock_pg.stream_patient_migration_records.return_value = [
         [
             {
-                "caseNo": "M999",
-                "visitDate": "2024-03-01",
-                "chiefComplaints": "● chronic insomnia\n● mild dizziness",
+                "caseNo": "DT100",
+                "visitDate": "2025-05-29",
+                "gender": "f",
+                "ageDay": 10,
+                "ageMonth": 5,
+                "ageYear": 30,
+                "age": 30.44,
+                "chiefComplaints": "● Sadness of Mood\n● Anxiety\n● no fever",
+                "visitReason": "Follow-up Visit",
+                "diagnosisNames": "Major depressive disorder, Panic disorder",
+                "medicineNames": "ZOLAVIL, ESCIREN",
+                "investigationNames": None,
+                "isLatest": 1,
             }
         ]
     ]
 
-    # Pre-existing MongoDB case document with diagnosis and visitReason
-    existing_mongo_doc = {
-        "_id": "case-uuid-999",
-        "caseNo": "M999",
-        "visitDate": "2024-03-01",
-        "visitReason": "Annual Checkup",
-        "patient_visit_id": "visit-uuid-999",
-        "diagnosis": [
-            {"term": "Essential hypertension", "mondoCode": 7777}
-        ],
+    mock_mongo = MagicMock()
+    mock_mongo.upsert_patient_cases_batch.return_value = {
+        "upserted_count": 1,
+        "modified_count": 0,
+        "matched_count": 0,
     }
 
-    mock_mongo = MagicMock()
-    mock_mongo.find_case_by_encounter.return_value = existing_mongo_doc
-    mock_mongo.update_case_symptoms.return_value = True
+    mock_assertion = MagicMock()
+    def fake_assertion(term):
+        is_negated = "no " in term.lower()
+        res = MagicMock()
+        res.term = term
+        res.search_target = term.replace("no ", "")
+        res.is_negated = is_negated
+        res.is_phenotype = not is_negated
+        return res
+    mock_assertion.analyze.side_effect = fake_assertion
 
-    mock_symptom_svc = MagicMock()
-    mock_symptom_svc.resolve_symptom.side_effect = lambda note, cache: {
-        "note": note,
-        "hpoCode": 1234,
-        "mondoCode": 5678,
-        "is_negated": False,
-        "is_phenotype": True,
-        "assertion_status": "affirmed",
-    }
+    mock_hpo = MagicMock()
+    mock_hpo_res = MagicMock()
+    mock_hpo_res.label = "Pathological sadness"
+    mock_hpo_res.hpo_id = "HP:0000712"
+    mock_hpo.search.return_value = [mock_hpo_res]
+
+    mock_mondo = MagicMock()
+    mock_mondo_res = MagicMock()
+    mock_mondo_res.label = "Major depressive disorder"
+    mock_mondo_res.mondo_id = "MONDO:0005252"
+    mock_mondo.search.return_value = [mock_mondo_res]
 
     mock_embedder = MagicMock()
-    mock_embedder.embed_entities.return_value = np.zeros((2, 768))
+    mock_embedder.embed_entities.return_value = np.ones((5, 768), dtype=np.float32)
 
     migration_svc = MigrationService(
         postgres_source=mock_pg,
         mongo_kb=mock_mongo,
-        symptom_service=mock_symptom_svc,
+        assertion_service=mock_assertion,
+        hpo_service=mock_hpo,
+        mondo_service=mock_mondo,
         embedder=mock_embedder,
     )
 
-    result = migration_svc.load_chief_complaints(batch_size=50)
+    steps_recorded = []
+    def progress_cb(update):
+        steps_recorded.append(update.get("current_step"))
+        return True
 
-    assert result["status"] == "success"
-    assert result["documents_updated"] == 1
-    assert result["documents_skipped"] == 0
+    res = migration_svc.run_patient_migration(batch_size=20, progress_callback=progress_cb)
 
-    # Ensure update_case_symptoms was called with case-uuid-999
-    mock_mongo.update_case_symptoms.assert_called_once()
-    called_id, symptoms = mock_mongo.update_case_symptoms.call_args[0]
-    assert called_id == "case-uuid-999"
-    assert len(symptoms) == 2
-    assert symptoms[0]["patient_visit_id"] == "visit-uuid-999"
-    assert symptoms[0]["note"] == "chronic insomnia"
-    assert symptoms[1]["note"] == "mild dizziness"
-
-    # Verify that existing_mongo_doc retains its 'diagnosis' and 'visitReason' fields!
-    assert "diagnosis" in existing_mongo_doc
-    assert existing_mongo_doc["diagnosis"][0]["term"] == "Essential hypertension"
-    assert existing_mongo_doc["visitReason"] == "Annual Checkup"
-
-
-def test_migration_service_batch_progress_logging(caplog):
-    """Verify batch progress logging ('completed batch X of Y') across all migrate-patient services."""
-    import logging
-
-    mock_pg = MagicMock()
-    mock_pg.get_patient_visit_count.return_value = 2500
-    mock_pg.stream_patient_visit_data.return_value = [
-        [{"caseNo": 1, "visitDate": "2024-01-01", "visitReason": "checkup"}],
-        [{"caseNo": 2, "visitDate": "2024-01-02", "visitReason": "fever"}],
-    ]
-
-    mock_pg.get_grouped_patient_diagnoses_count.return_value = 2000
-    mock_pg.stream_grouped_patient_diagnoses.return_value = [
-        [{"caseNo": 1, "visitDate": "2024-01-01", "diagnosisNames": ["flu"]}],
-    ]
-
-    mock_pg.get_patient_chief_complaints_count.return_value = 200
-    mock_pg.stream_patient_chief_complaints.return_value = [
-        [{"caseNo": 1, "visitDate": "2024-01-01", "chiefComplaints": "headache"}],
-    ]
-
-    mock_mongo = MagicMock()
-    mock_mongo.upsert_patient_visits_batch.return_value = {"upserted_count": 1}
-    mock_mongo.replace_case_diagnoses_batch.return_value = {"modified_count": 1}
-    mock_mongo.find_case_by_encounter.return_value = {"_id": "c1", "patient_visit_id": "v1"}
-    mock_mongo.update_case_symptoms.return_value = True
-
-    mock_symptom_svc = MagicMock()
-    mock_symptom_svc.resolve_symptom.return_value = {"note": "headache", "hpoCode": 1, "mondoCode": 2}
-
-    mock_embedder = MagicMock()
-    mock_embedder.embed_entities.return_value = np.zeros((1, 768))
-
-    migration_svc = MigrationService(
-        postgres_source=mock_pg,
-        mongo_kb=mock_mongo,
-        symptom_service=mock_symptom_svc,
-        embedder=mock_embedder,
-    )
-
-    with caplog.at_level(logging.INFO):
-        # 1. Test migrate_patient_visits
-        res_visits = migration_svc.migrate_patient_visits(batch_size=1000)
-        assert res_visits["batches_processed"] == 2
-        assert "Patient visits migration: completed batch 1 of 3" in caplog.text
-        assert "Patient visits migration: completed batch 2 of 3" in caplog.text
-
-        caplog.clear()
-
-        # 2. Test migrate_patient_diagnoses
-        res_diag = migration_svc.migrate_patient_diagnoses(batch_size=1000)
-        assert res_diag["batches_processed"] == 1
-        assert "Patient diagnoses migration: completed batch 1 of 2" in caplog.text
-
-        caplog.clear()
-
-        # 3. Test load_chief_complaints
-        res_cc = migration_svc.load_chief_complaints(batch_size=100)
-        assert res_cc["batches_processed"] == 1
-        assert "Patient chief complaints migration: completed batch 1 of 2" in caplog.text
-
-
-def test_migrate_patient_diagnoses_payload_structure():
-    """Verify that migrate_patient_diagnoses formats diagnosis payloads with term, mondoTerm, mondoCode, and embedding."""
-    mock_pg = MagicMock()
-    mock_pg.get_grouped_patient_diagnoses_count.return_value = 1
-    mock_pg.stream_grouped_patient_diagnoses.return_value = [
-        [{"caseNo": 100, "visitDate": "2024-05-01", "diagnosisNames": ["Essential Hypertension"]}],
-    ]
-
-    mock_mongo = MagicMock()
-    mock_mongo.replace_case_diagnoses_batch.return_value = {"modified_count": 1, "matched_count": 1}
-
-    mock_embedder = MagicMock()
-    mock_embedder.embed_entities.return_value = np.ones((1, 768), dtype=np.float32)
-
-    migration_svc = MigrationService(
-        postgres_source=mock_pg,
-        mongo_kb=mock_mongo,
-        embedder=mock_embedder,
-    )
-
-    res = migration_svc.migrate_patient_diagnoses(batch_size=100)
     assert res["status"] == "success"
-    mock_mongo.replace_case_diagnoses_batch.assert_called_once()
-    called_batch = mock_mongo.replace_case_diagnoses_batch.call_args[0][0]
-    assert len(called_batch) == 1
-    enc_doc = called_batch[0]
-    assert enc_doc["caseNo"] == 100
-    assert enc_doc["visitDate"] == "2024-05-01"
-    assert len(enc_doc["diagnosis"]) == 1
-    diag_item = enc_doc["diagnosis"][0]
-    assert "term" in diag_item
-    assert "mondoTerm" in diag_item
-    assert "mondoCode" in diag_item
-    assert "embedding" in diag_item
-    assert diag_item["term"] == "Essential Hypertension"
-    assert len(diag_item["embedding"]) == 768
+    assert res["total_records_processed"] == 1
+    assert res["upserted_count"] == 1
+
+    # Verify flow steps: start -> query docs from psql -> decorate -> save to mongodb -> extended
+    assert "start" in steps_recorded
+    assert "query docs from psql" in steps_recorded
+    assert "decorate" in steps_recorded
+    assert "save to mongodb" in steps_recorded
+    assert "extended" in steps_recorded
+
+    # Verify MongoDB upsert was called with decorated case
+    mock_mongo.upsert_patient_cases_batch.assert_called_once()
+    saved_batch = mock_mongo.upsert_patient_cases_batch.call_args[0][0]
+    assert len(saved_batch) == 1
+    case = saved_batch[0]
+
+    assert case["caseNo"] == "DT100"
+    assert case["visitDate"] == "2025-05-29"
+    assert case["visitReason"] == "Follow-up Visit"
+    assert case["isLatest"] is True
+
+    # 1. Symptoms decoration
+    symptoms = case["chiefComplaints"]
+    assert len(symptoms) == 3
+    assert symptoms[0]["term"] == "Sadness of Mood"
+    assert symptoms[0]["hboTerm"] == "Pathological sadness"
+    assert len(symptoms[0]["embedding"]) == 768
+    assert symptoms[0]["is_negated"] is False
+    assert symptoms[2]["term"] == "no fever"
+    assert symptoms[2]["is_negated"] is True
+
+    # 2. Diagnosis decoration
+    diagnoses = case["diagnosis"]
+    assert len(diagnoses) == 2
+    assert diagnoses[0]["term"] == "Major depressive disorder"
+    assert diagnoses[0]["mondoTerm"] == "Major depressive disorder"
+    assert len(diagnoses[0]["embedding"]) == 768
+    assert diagnoses[0]["is_negated"] is False
+
+    # 3. Medicines decoration
+    medications = case["medications"]
+    assert len(medications) == 2
+    assert medications[0]["original_term"] == "ZOLAVIL"
+    assert isinstance(medications[0]["canonical_molecule"], list)
+    assert "is_fdc" in medications[0]
+    assert "clinical_note" in medications[0]
+
+
+def test_patient_migration_runner_lifecycle():
+    """Verify background runner start, stop, and status tracking."""
+    from meldai.services.chief_complaints_runner import PatientMigrationRunner
+
+    mock_svc = MagicMock()
+    mock_svc.run_patient_migration.return_value = {
+        "status": "success",
+        "batch_size": 20,
+        "total_records_processed": 20,
+        "batches_processed": 1,
+        "upserted_count": 20,
+        "modified_count": 0,
+        "matched_count": 0,
+    }
+
+    runner = PatientMigrationRunner(migration_service=mock_svc)
+    status_idle = runner.get_status()
+    assert status_idle["status"] == "idle"
+
+    start_res = runner.start(batch_size=20)
+    assert start_res["status"] == "started"
+
+    time.sleep(0.1)
+    status_done = runner.get_status()
+    assert status_done["status"] in ("completed", "running")
+
+    stop_res = runner.stop()
+    assert stop_res["status"] in ("stopped", "stopping", "completed")
 
 
 # ---------------------------------------------------------------------------
