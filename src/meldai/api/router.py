@@ -13,6 +13,7 @@ from meldai.api.req_dtos import (
     MedicationSearchQueryRequest,
     MedicineSearchRequest,
     PrescribeMedicationsRequest,
+    PrescribeMedicationsV2Request,
     SegmentSymptomsRequest,
 )
 from meldai.api.res_dtos import (
@@ -27,6 +28,7 @@ from meldai.api.res_dtos import (
     PatientMigrationResponse,
     PatientMigrationStatusResponse,
     PrescribeMedicationsResponse,
+    PrescribeMedicationsV2Response,
     PrescribePipelineActionResponse,
     PrescribePipelineStatusResponse,
     SegmentSymptomsResponse,
@@ -49,6 +51,7 @@ from meldai.services.medicine_master_service import MedicineMasterService
 from meldai.services.migration_service import MigrationService
 from meldai.services.postgres_prescription_service import PostgresPrescriptionService
 from meldai.services.prescription_service import PrescriptionService
+from meldai.services.prescription_service_v2 import PrescriptionServiceV2
 from meldai.services.symptom_service import SymptomService
 from meldai.services.terminology_service import TerminologySearchService
 from meldai.terminology.hpo import HPOResult, get_hpo_service
@@ -421,6 +424,44 @@ def prescribe_medications(
     except Exception as exc:
         logger.error("Prescribe medications failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Prescribe medications failed: {str(exc)}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Prescribe Medications V2 (Multi-Step Reasoning — per-entity matrix + deprescribing)
+# ---------------------------------------------------------------------------
+
+def _get_prescription_service_v2() -> PrescriptionServiceV2:
+    """Lazy factory for PrescriptionServiceV2 — instantiated per request."""
+    settings = get_settings()
+    return PrescriptionServiceV2(settings=settings)
+
+
+@api_router.post(
+    "/cases/prescribe-medications/v2",
+    response_model=PrescribeMedicationsV2Response,
+    summary="V2: Multi-step medication reasoning with per-entity matrix and deprescribing",
+)
+def prescribe_medications_v2(
+    payload: PrescribeMedicationsV2Request,
+) -> PrescribeMedicationsV2Response:
+    """Multi-step prescribing pipeline:
+
+    1. Decorate the case (HPO / MONDO / SapBERT embeddings).
+    2. Fetch patient past visits from MongoDB.
+    3. Compute clinical delta (new / persistent / improving / resolved entities).
+    4. Run per-entity similarity retrieval against the full MongoDB candidate pool.
+    5. Build entity-to-molecule frequency matrix.
+    6. For follow-up visits: call the deprescribing LLM on resolved/improving entities.
+    7. Call the regimen synthesis LLM with the matrix + deprescribing plan + formulary.
+    """
+    try:
+        svc = _get_prescription_service_v2()
+        return svc.prescribe_medications_v2(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Prescribe medications v2 failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Prescribe medications v2 failed: {str(exc)}") from exc
 
 
 # ---------------------------------------------------------------------------

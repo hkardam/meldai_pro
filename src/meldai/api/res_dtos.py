@@ -208,3 +208,84 @@ class PrescribePipelineStatusResponse(BaseModel):
     elapsed_seconds: float = Field(default=0.0, description="Wall-clock seconds since the pipeline started")
     error: Optional[str] = Field(default=None, description="Top-level fatal error message if status is 'failed'")
 
+
+# ---------------------------------------------------------------------------
+# V2 Prescribe Medications — Multi-Step Reasoning
+# ---------------------------------------------------------------------------
+
+class EntityMoleculeRow(BaseModel):
+    """Top candidate molecules/FDCs the doctor historically used for a single symptom or diagnosis entity."""
+
+    entity: str = Field(..., description="Symptom or diagnosis term")
+    entity_type: str = Field(..., description="'symptom' or 'diagnosis'")
+    curie: Optional[str] = Field(default=None, description="HPO or MONDO CURIE for the entity")
+    # Each item: {molecule, is_fdc, frequency, avg_similarity, doctor_brands}
+    top_molecules: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Ranked molecules/FDCs with doctor frequency, similarity score, and brand examples",
+    )
+    # LLM attribution result: which meds from retrieved cases target this entity
+    attributed_molecules: List[str] = Field(
+        default_factory=list,
+        description="Molecules/FDCs attributed by the LLM as targeting this entity",
+    )
+
+
+class DeprescribingRecommendation(BaseModel):
+    """Recommendation for a medication when evaluating clinical entity delta."""
+
+    medicine: str = Field(..., description="Medication name or molecule")
+    target_symptom: str = Field(..., description="Symptom or diagnosis entity it targets")
+    status_change: str = Field(
+        ...,
+        description="'stop' | 'maintained' | 'decreased' | 'increased' | 'new' (or 'resolved')",
+    )
+    action: str = Field(
+        ...,
+        description="'stop' | 'maintained' | 'decreased' | 'increased' | 'new'",
+    )
+    rationale: str = Field(..., description="Clinical reasoning for the recommended action")
+    taper_plan: Optional[str] = Field(
+        default=None,
+        description="Step-down schedule, dose adjustment instruction, or null",
+    )
+
+
+class PrescribeMedicationsV2Response(BaseModel):
+    """Full v2 clinical summary and encounter progression response."""
+
+    clinical_summary: str = Field(default="", description="Human-readable text of clinical summary for the case")
+    consultation_type: str = Field(..., description="'new_consultation' or 'follow_up'")
+    # Final medications recommended (new or continued) — same structure as v1 medications list
+    medications: List[Union[Dict[str, Any], str]] = Field(
+        default_factory=list,
+        description="Final recommended medication master objects or molecule/brand name strings",
+    )
+    # Medications to stop or taper (follow-up only)
+    deprescribed_meds: List[DeprescribingRecommendation] = Field(
+        default_factory=list,
+        description="Prior medications recommended for stopping or tapering",
+    )
+    # Per-entity matrix showing which molecules were considered for each symptom/diagnosis
+    entity_matrix: List[EntityMoleculeRow] = Field(
+        default_factory=list,
+        description="Per-entity top molecule breakdown used as matrix input to the final LLM",
+    )
+    # Delta summary for follow-up visits
+    history_delta: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Summary of what changed between past visits and the current encounter",
+    )
+    explanation: str = Field(default="", description="Clinical justification for the final regimen")
+    past_cases_count: int = Field(default=0, description="Number of prior patient visits used")
+    run_id: Optional[str] = Field(default=None, description="Run ID for prompt/response trace files in tmp/")
+    metrics: Dict[str, Any] = Field(default_factory=dict, description="LLM token usage, cost, and response time")
+    end_prompt: Optional[str] = Field(
+        default=None,
+        description="Complete end prompt with all data sections sent to the final synthesis LLM",
+    )
+    deprescribe_prompt: Optional[str] = Field(
+        default=None,
+        description="Complete prompt sent to the deprescribing LLM if review was performed",
+    )
+

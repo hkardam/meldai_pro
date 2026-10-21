@@ -95,3 +95,20 @@ class MedicationSearchQueryRequest(BaseModel):
             self.symptoms = self.symptom
         return self
 
+
+class PrescribeMedicationsV2Request(BaseModel):
+    """V2 prescribe request — drives multi-step, per-entity medication reasoning."""
+
+    case: CaseInput = Field(..., description="Target case details (visitType, patientInfo, symptoms, diagnosis)")
+    top_k_per_entity: int = Field(
+        default=5, ge=1, le=20,
+        description="Top-k similar MongoDB cases to retrieve per symptom or diagnosis entity",
+    )
+    enable_deprescribing: bool = Field(
+        default=True,
+        description="For follow-up visits: evaluate whether prior medications can be stopped or tapered",
+    )
+    params: Optional[SimilarityParams] = Field(
+        default_factory=SimilarityParams,
+        description="Similarity scoring weights for candidate retrieval",
+    )
