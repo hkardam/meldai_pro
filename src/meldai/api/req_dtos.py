@@ -112,3 +112,60 @@ class PrescribeMedicationsV2Request(BaseModel):
         default_factory=SimilarityParams,
         description="Similarity scoring weights for candidate retrieval",
     )
+
+
+class SimilarityWeightsInput(BaseModel):
+    """Weights for composite similarity scoring across LCA and vector, with minimum match cutoff."""
+
+    w_lca: float = Field(default=0.5, ge=0.0, description="Weight for Least Common Ancestor / Wu-Palmer ontology similarity")
+    w_vector: float = Field(default=0.5, ge=0.0, description="Weight for SapBERT semantic vector similarity")
+    min_similarity: float = Field(default=0.5, ge=0.0, le=1.0, description="Minimum similarity required to call it a match")
+    w_age: Optional[float] = Field(default=None, ge=0.0, description="Optional legacy weight for age similarity")
+
+
+class RankMoleculesRequest(BaseModel):
+    """Request to rank top molecules by prescription frequency in similar cases."""
+
+    type: str = Field(..., description="Entity type: 'chiefComplaint' | 'chiefComplain' | 'symptom' | 'diagnosis'")
+    query: str = Field(..., description="Query symptom or diagnosis term (e.g. 'insomnia', 'MDD')")
+    k: int = Field(default=5, ge=1, le=50, description="Top-k molecules to return by frequency")
+    patient_info: Optional[PatientInfoInput] = Field(default=None, description="Patient demographics (age and gender)")
+    patient_age: Optional[float] = Field(default=None, description="Patient age in completed years")
+    age: Optional[float] = Field(default=None, description="Alias for patient_age")
+    patient_gender: Optional[str] = Field(default=None, description="Patient gender (e.g. 'Male', 'Female')")
+    gender: Optional[str] = Field(default=None, description="Alias for patient_gender")
+    weights: Optional[SimilarityWeightsInput] = Field(
+        default_factory=SimilarityWeightsInput,
+        description="Similarity scoring weights for LCA, vector, and match cutoff",
+    )
+    params: Optional[SimilarityWeightsInput] = Field(default=None, description="Alias for weights")
+    top_cases_limit: int = Field(default=20, ge=1, le=100, description="Number of top similar cases to aggregate molecules from")
+    candidate_pool_limit: int = Field(default=500, ge=10, le=2000, description="MongoDB candidate cases to evaluate")
+
+    @model_validator(mode="after")
+    def normalize_fields(self):
+        # 1. Alias handling for weights / params
+        if self.params is not None and (self.weights is None or self.weights == SimilarityWeightsInput()):
+            self.weights = self.params
+        elif self.weights is None:
+            self.weights = SimilarityWeightsInput()
+
+        # 2. Demographic aliases and normalization
+        if self.patient_age is None and self.age is not None:
+            self.patient_age = self.age
+        if self.patient_gender is None and self.gender is not None:
+            self.patient_gender = self.gender
+
+        if self.patient_info is not None:
+            if self.patient_age is None and self.patient_info.age is not None:
+                self.patient_age = self.patient_info.age
+            if self.patient_gender is None and self.patient_info.gender is not None:
+                self.patient_gender = self.patient_info.gender
+        elif self.patient_age is not None or self.patient_gender is not None:
+            self.patient_info = PatientInfoInput(
+                age=self.patient_age,
+                gender=self.patient_gender,
+            )
+
+        return self
+

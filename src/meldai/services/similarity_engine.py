@@ -272,6 +272,55 @@ def patient_similarity(age_q: Optional[float], age_c: Optional[float], sigma: fl
     return min(max(score, 0.0), 1.0)
 
 
+def normalize_gender(val: Optional[str]) -> Optional[str]:
+    """Normalize raw gender string to 'male', 'female', 'other', or None."""
+    if not val:
+        return None
+    s = str(val).strip().lower()
+    if s in ("m", "male"):
+        return "male"
+    elif s in ("f", "female"):
+        return "female"
+    elif s in ("o", "other"):
+        return "other"
+    return s
+
+
+def gender_similarity(gender_q: Optional[str], gender_c: Optional[str]) -> Optional[float]:
+    """Compute gender similarity: 1.0 if match, 0.0 if mismatch, None if either missing."""
+    norm_q = normalize_gender(gender_q)
+    norm_c = normalize_gender(gender_c)
+    if not norm_q or not norm_c:
+        return None
+    return 1.0 if norm_q == norm_c else 0.0
+
+
+def patient_info_similarity(
+    age_q: Optional[float] = None,
+    age_c: Optional[float] = None,
+    gender_q: Optional[str] = None,
+    gender_c: Optional[str] = None,
+    sigma: float = SIGMA,
+) -> Optional[float]:
+    """Compute patient demographic similarity combining age group and gender.
+
+    Missing values on either dimension evaluate to None.
+    If both age and gender similarities are present, returns their average.
+    If only one dimension is present, returns that score.
+    Returns None if neither dimension could be compared.
+    """
+    age_sim = patient_similarity(age_q, age_c, sigma=sigma)
+    gen_sim = gender_similarity(gender_q, gender_c)
+
+    if age_sim is not None and gen_sim is not None:
+        return 0.5 * age_sim + 0.5 * gen_sim
+    if age_sim is not None:
+        return age_sim
+    if gen_sim is not None:
+        return gen_sim
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Visit Type Similarity
 # ---------------------------------------------------------------------------

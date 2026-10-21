@@ -686,7 +686,7 @@
       "name": "Case Similarity & Search",
       "item": [
         {
-          "name": "Find Similar Cases",
+          "name": "Rank Medications by Similarity",
           "request": {
             "method": "POST",
             "header": [
@@ -703,10 +703,10 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"case\": {\n    \"caseNo\": 101,\n    \"caseDate\": \"2024-03-15\",\n    \"visitType\": \"follow-up\",\n    \"patientInfo\": {\n      \"age\": 45.0,\n      \"gender\": \"Male\"\n    },\n    \"symptoms\": [\n      \"lack of sleep\",\n      \"no fever\"\n    ],\n    \"diagnosis\": [\n      \"Insomia\"\n    ]\n  },\n  \"top_k\": 10,\n  \"params\": {\n    \"wDiagnosisScore\": 0.4,\n    \"wSymptomsScore\": 0.4,\n    \"wPatientScore\": 0.1,\n    \"wVisitTypeScore\": 0.1,\n    \"sameVisitTypeOnly\": false\n  }\n}"
+              "raw": "{\n  \"type\": \"chiefComplaint\",\n  \"query\": \"insomnia\",\n  \"k\": 5,\n  \"patient_age\": 45.0,\n  \"patient_gender\": \"Male\",\n  \"weights\": {\n    \"w_lca\": 0.5,\n    \"w_vector\": 0.5,\n    \"min_similarity\": 0.5\n  },\n  \"top_cases_limit\": 20,\n  \"candidate_pool_limit\": 500\n}"
             },
             "url": {
-              "raw": "{{base_url}}/api/v1/cases/find-similar",
+              "raw": "{{base_url}}/api/v1/cases/rank-meds",
               "host": [
                 "{{base_url}}"
               ],
@@ -714,10 +714,10 @@
                 "api",
                 "v1",
                 "cases",
-                "find-similar"
+                "rank-meds"
               ]
             },
-            "description": "Decorate clinical case with HPO/MONDO concepts and retrieve similar cases."
+            "description": "Rank top-k molecules by prescription score from similar cases matching LCA + vector (meeting min_similarity cutoff) and sorted post-match by patient demographics."
           },
           "response": [
             {
@@ -725,7 +725,7 @@
               "originalRequest": {
                 "method": "POST",
                 "url": {
-                  "raw": "{{base_url}}/api/v1/cases/find-similar",
+                  "raw": "{{base_url}}/api/v1/cases/rank-meds",
                   "host": [
                     "{{base_url}}"
                   ],
@@ -733,7 +733,7 @@
                     "api",
                     "v1",
                     "cases",
-                    "find-similar"
+                    "rank-meds"
                   ]
                 }
               },
@@ -746,7 +746,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"decoratedCase\": {\n    \"caseNo\": 101,\n    \"visitType\": \"follow-up\",\n    \"patientInfo\": {\n      \"age\": 45.0,\n      \"gender\": \"Male\"\n    },\n    \"symptoms\": [\n      {\n        \"term\": \"lack of sleep\",\n        \"hpoTerm\": \"Sleep disturbance\",\n        \"hpoCode\": 2360,\n        \"embedding\": null,\n        \"isNegation\": false,\n        \"isPheno\": true,\n        \"similarity\": null\n      },\n      {\n        \"term\": \"no fever\",\n        \"hpoTerm\": \"Fever\",\n        \"hpoCode\": 1945,\n        \"embedding\": null,\n        \"isNegation\": true,\n        \"isPheno\": false,\n        \"similarity\": null\n      }\n    ],\n    \"diagnosis\": [\n      {\n        \"term\": \"Insomia\",\n        \"mondoTerm\": \"insomnia (disease)\",\n        \"mondoCode\": 8807,\n        \"embedding\": null,\n        \"similarity\": null\n      }\n    ]\n  },\n  \"pastCases\": [],\n  \"similarCases\": [\n    {\n      \"case\": {\n        \"caseNo\": 201,\n        \"visitDate\": \"2024-02-01\",\n        \"visitType\": \"follow-up\",\n        \"medication\": [\n          \"paracetamol\"\n        ],\n        \"patientInfo\": {\n          \"age\": 45.0,\n          \"gender\": \"m\"\n        },\n        \"diagnosis\": [\n          {\n            \"term\": \"insomnia\"\n          }\n        ],\n        \"symptoms\": [\n          {\n            \"term\": \"lack of sleep\"\n          }\n        ]\n      },\n      \"finalScore\": 0.95,\n      \"components\": {\n        \"diagnosis\": 0.92,\n        \"symptoms\": 0.94,\n        \"patient\": 1.0,\n        \"visitType\": 1.0\n      }\n    }\n  ]\n}"
+              "body": "{\n  \"type\": \"chiefComplaint\",\n  \"query\": \"insomnia\",\n  \"k\": 5,\n  \"curie\": \"HP:0002360\",\n  \"matched_term\": \"Sleep disturbance\",\n  \"similar_cases_count\": 20,\n  \"weights_applied\": {\n    \"w_lca\": 0.5,\n    \"w_vector\": 0.5,\n    \"min_similarity\": 0.5,\n    \"patient_info_used\": 1.0\n  },\n  \"molecules\": [\n    {\n      \"canonical_molecule\": \"Zolpidem\",\n      \"is_fdc\": false,\n      \"score\": 12.32,\n      \"frequency\": 14,\n      \"percentage\": 70.0,\n      \"avg_similarity\": 0.88,\n      \"doctor_brands\": [\n        \"ZOLFRESH\",\n        \"ZOLRIN\"\n      ]\n    },\n    {\n      \"canonical_molecule\": \"Etizolam\",\n      \"is_fdc\": false,\n      \"score\": 7.38,\n      \"frequency\": 9,\n      \"percentage\": 45.0,\n      \"avg_similarity\": 0.82,\n      \"doctor_brands\": [\n        \"ZOLAVIL\",\n        \"ETICALM\"\n      ]\n    }\n  ]\n}"
             }
           ]
         },

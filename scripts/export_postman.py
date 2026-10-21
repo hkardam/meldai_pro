@@ -603,10 +603,10 @@ def build_postman_collection() -> Dict[str, Any]:
         }
     )
 
-    # 13. Find Similar Cases
+    # 13. Rank Medications by Similarity
     folders["Case Similarity & Search"].append(
         {
-            "name": "Find Similar Cases",
+            "name": "Rank Medications by Similarity",
             "request": {
                 "method": "POST",
                 "header": [
@@ -617,35 +617,28 @@ def build_postman_collection() -> Dict[str, Any]:
                     "mode": "raw",
                     "raw": json.dumps(
                         {
-                            "case": {
-                                "caseNo": 101,
-                                "caseDate": "2024-03-15",
-                                "visitType": "follow-up",
-                                "patientInfo": {
-                                    "age": 45.0,
-                                    "gender": "Male",
-                                },
-                                "symptoms": ["lack of sleep", "no fever"],
-                                "diagnosis": ["Insomia"],
+                            "type": "chiefComplaint",
+                            "query": "insomnia",
+                            "k": 5,
+                            "patient_age": 45.0,
+                            "patient_gender": "Male",
+                            "weights": {
+                                "w_lca": 0.5,
+                                "w_vector": 0.5,
+                                "min_similarity": 0.5,
                             },
-                            "top_k": 10,
-                            "params": {
-                                "wDiagnosisScore": 0.4,
-                                "wSymptomsScore": 0.4,
-                                "wPatientScore": 0.1,
-                                "wVisitTypeScore": 0.1,
-                                "sameVisitTypeOnly": False,
-                            },
+                            "top_cases_limit": 20,
+                            "candidate_pool_limit": 500,
                         },
                         indent=2,
                     ),
                 },
                 "url": {
-                    "raw": "{{base_url}}/api/v1/cases/find-similar",
+                    "raw": "{{base_url}}/api/v1/cases/rank-meds",
                     "host": ["{{base_url}}"],
-                    "path": ["api", "v1", "cases", "find-similar"],
+                    "path": ["api", "v1", "cases", "rank-meds"],
                 },
-                "description": "Decorate clinical case with HPO/MONDO concepts and retrieve similar cases.",
+                "description": "Rank top-k molecules by prescription score from similar cases matching LCA + vector (meeting min_similarity cutoff) and sorted post-match by patient demographics.",
             },
             "response": [
                 {
@@ -653,9 +646,9 @@ def build_postman_collection() -> Dict[str, Any]:
                     "originalRequest": {
                         "method": "POST",
                         "url": {
-                            "raw": "{{base_url}}/api/v1/cases/find-similar",
+                            "raw": "{{base_url}}/api/v1/cases/rank-meds",
                             "host": ["{{base_url}}"],
-                            "path": ["api", "v1", "cases", "find-similar"],
+                            "path": ["api", "v1", "cases", "rank-meds"],
                         },
                     },
                     "status": "OK",
@@ -664,63 +657,37 @@ def build_postman_collection() -> Dict[str, Any]:
                     "header": [{"key": "Content-Type", "value": "application/json"}],
                     "body": json.dumps(
                         {
-                            "decoratedCase": {
-                                "caseNo": 101,
-                                "visitType": "follow-up",
-                                "patientInfo": {
-                                    "age": 45.0,
-                                    "gender": "Male",
-                                },
-                                "symptoms": [
-                                    {
-                                        "term": "lack of sleep",
-                                        "hpoTerm": "Sleep disturbance",
-                                        "hpoCode": 2360,
-                                        "embedding": None,
-                                        "isNegation": False,
-                                        "isPheno": True,
-                                        "similarity": None,
-                                    },
-                                    {
-                                        "term": "no fever",
-                                        "hpoTerm": "Fever",
-                                        "hpoCode": 1945,
-                                        "embedding": None,
-                                        "isNegation": True,
-                                        "isPheno": False,
-                                        "similarity": None,
-                                    },
-                                ],
-                                "diagnosis": [
-                                    {
-                                        "term": "Insomia",
-                                        "mondoTerm": "insomnia (disease)",
-                                        "mondoCode": 8807,
-                                        "embedding": None,
-                                        "similarity": None,
-                                    },
-                                ],
+                            "type": "chiefComplaint",
+                            "query": "insomnia",
+                            "k": 5,
+                            "curie": "HP:0002360",
+                            "matched_term": "Sleep disturbance",
+                            "similar_cases_count": 20,
+                            "weights_applied": {
+                                "w_lca": 0.5,
+                                "w_vector": 0.5,
+                                "min_similarity": 0.5,
+                                "patient_info_used": 1.0,
                             },
-                            "pastCases": [],
-                            "similarCases": [
+                            "molecules": [
                                 {
-                                    "case": {
-                                        "caseNo": 201,
-                                        "visitDate": "2024-02-01",
-                                        "visitType": "follow-up",
-                                        "medication": ["paracetamol"],
-                                        "patientInfo": {"age": 45.0, "gender": "m"},
-                                        "diagnosis": [{"term": "insomnia"}],
-                                        "symptoms": [{"term": "lack of sleep"}],
-                                    },
-                                    "finalScore": 0.95,
-                                    "components": {
-                                        "diagnosis": 0.92,
-                                        "symptoms": 0.94,
-                                        "patient": 1.0,
-                                        "visitType": 1.0,
-                                    },
-                                }
+                                    "canonical_molecule": "Zolpidem",
+                                    "is_fdc": False,
+                                    "score": 12.32,
+                                    "frequency": 14,
+                                    "percentage": 70.0,
+                                    "avg_similarity": 0.88,
+                                    "doctor_brands": ["ZOLFRESH", "ZOLRIN"],
+                                },
+                                {
+                                    "canonical_molecule": "Etizolam",
+                                    "is_fdc": False,
+                                    "score": 7.38,
+                                    "frequency": 9,
+                                    "percentage": 45.0,
+                                    "avg_similarity": 0.82,
+                                    "doctor_brands": ["ZOLAVIL", "ETICALM"],
+                                },
                             ],
                         },
                         indent=2,

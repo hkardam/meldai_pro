@@ -301,63 +301,57 @@ def test_migrate_patients_runner_endpoints():
         assert resp_stop.json()["status"] == "stopping"
 
 
-def test_find_similar_cases_endpoint():
-    mock_case_svc = MagicMock()
-    mock_case_svc.find_similar_cases.return_value = {
-        "decoratedCase": {
-            "caseNo": 999,
-            "patientInfo": {"age": 50, "gender": "Female"},
-            "symptoms": [
-                {
-                    "term": "lack of sleep",
-                    "hpoTerm": "Insomnia",
-                    "hpoCode": 2360,
-                    "embedding": [0.1] * 768,
-                    "isNegation": False,
-                    "isPheno": True,
-                    "similarity": None,
-                }
-            ],
-            "diagnosis": [
-                {
-                    "term": "Insomia",
-                    "mondoTerm": "insomnia",
-                    "mondoCode": 8807,
-                    "embedding": [0.1] * 768,
-                    "similarity": None,
-                }
-            ],
-        },
-        "similarCases": [],
-    }
+def test_rank_meds_endpoint():
+    from meldai.api.res_dtos import RankMoleculesResponse, RankedMoleculeItem
 
-    with patch("meldai.api.router._get_case_service", return_value=mock_case_svc):
+    mock_resp = RankMoleculesResponse(
+        type="chiefComplaint",
+        query="lack of sleep",
+        k=2,
+        curie="HP:0002360",
+        matched_term="Sleep disturbance",
+        similar_cases_count=5,
+        weights_applied={"w_lca": 0.5, "w_vector": 0.5, "min_similarity": 0.5, "patient_info_used": 1.0},
+        molecules=[
+            RankedMoleculeItem(
+                canonical_molecule="Zolpidem",
+                is_fdc=False,
+                score=3.64,
+                frequency=4,
+                percentage=80.0,
+                avg_similarity=0.91,
+                doctor_brands=["ZOLFRESH"],
+            )
+        ],
+    )
+
+    with patch("meldai.api.router.rank_meds", return_value=mock_resp):
         payload = {
-            "case": {
-                "caseNo": 999,
-                "visitType": "follow-up",
-                "patientInfo": {"age": 50, "gender": "Female"},
-                "symptoms": ["lack of sleep"],
-                "diagnosis": ["Insomia"],
-            }
+            "type": "chiefComplaint",
+            "query": "lack of sleep",
+            "k": 2,
+            "patient_age": 50.0,
+            "patient_gender": "Male",
+            "weights": {
+                "w_lca": 0.5,
+                "w_vector": 0.5,
+                "min_similarity": 0.5,
+            },
         }
-        resp = client.post("/api/v1/cases/find-similar", json=payload)
+        resp = client.post("/api/v1/cases/rank-meds", json=payload)
 
     assert resp.status_code == 200
     data = resp.json()
-    assert "decoratedCase" in data
-    assert data["decoratedCase"]["caseNo"] == 999
-    assert data["decoratedCase"]["patientInfo"]["age"] == 50
-    assert data["decoratedCase"]["patientInfo"]["gender"] == "Female"
-    assert len(data["decoratedCase"]["symptoms"]) == 1
-    assert data["decoratedCase"]["symptoms"][0]["term"] == "lack of sleep"
-    assert data["decoratedCase"]["symptoms"][0]["hpoCode"] == 2360
-    assert len(data["decoratedCase"]["symptoms"][0]["embedding"]) == 768
-    assert len(data["decoratedCase"]["diagnosis"]) == 1
-    assert data["decoratedCase"]["diagnosis"][0]["term"] == "Insomia"
-    assert data["decoratedCase"]["diagnosis"][0]["mondoCode"] == 8807
-    assert len(data["decoratedCase"]["diagnosis"][0]["embedding"]) == 768
-    assert data["similarCases"] == []
+    assert data["type"] == "chiefComplaint"
+    assert data["query"] == "lack of sleep"
+    assert data["k"] == 2
+    assert data["curie"] == "HP:0002360"
+    assert len(data["molecules"]) == 1
+    assert data["molecules"][0]["canonical_molecule"] == "Zolpidem"
+    assert data["molecules"][0]["score"] == 3.64
+
+    assert data["molecules"][0]["frequency"] == 4
+
 
 
 def test_biolord_embed_endpoint():
@@ -457,5 +451,178 @@ def test_generate_medication_search_queries_endpoint():
     assert len(data["vector_semantic_queries"]) == 1
     assert "OCD" in data["vector_semantic_queries"][0]
     assert "SSRI" in data["bm25_keywords"]
+
+
+def test_similarity_weights_and_rank_molecules_request_dto():
+    from meldai.api.req_dtos import PatientInfoInput, RankMoleculesRequest, SimilarityWeightsInput
+
+    # 1. Defaults: w_lca=0.5, w_vector=0.5, min_similarity=0.5
+    w = SimilarityWeightsInput()
+    assert w.w_lca == 0.5
+    assert w.w_vector == 0.5
+    assert w.min_similarity == 0.5
+
+    # 2. Weights min_similarity encapsulated inside weights
+    req1 = RankMoleculesRequest(
+        type="symptom",
+        query="insomnia",
+        weights=SimilarityWeightsInput(min_similarity=0.65),
+    )
+    assert req1.weights.min_similarity == 0.65
+
+    # 3. Params alias for weights
+    req2 = RankMoleculesRequest(
+        type="symptom",
+        query="insomnia",
+        params=SimilarityWeightsInput(w_lca=0.7, w_vector=0.3, min_similarity=0.4),
+    )
+    assert req2.weights.w_lca == 0.7
+    assert req2.weights.w_vector == 0.3
+    assert req2.weights.min_similarity == 0.4
+
+    # 5. Demographics aliases (age, gender -> patient_age, patient_gender, patient_info)
+    req4 = RankMoleculesRequest(type="symptom", query="insomnia", age=35.0, gender="Female")
+    assert req4.patient_age == 35.0
+    assert req4.patient_gender == "Female"
+    assert req4.patient_info is not None
+    assert req4.patient_info.age == 35.0
+    assert req4.patient_info.gender == "Female"
+
+    # 6. Demographics from patient_info object
+    req5 = RankMoleculesRequest(
+        type="symptom",
+        query="insomnia",
+        patient_info=PatientInfoInput(age=42.0, gender="Male"),
+    )
+    assert req5.patient_age == 42.0
+    assert req5.patient_gender == "Male"
+
+
+def test_patient_info_similarity():
+    from meldai.services.similarity_engine import (
+        gender_similarity,
+        normalize_gender,
+        patient_info_similarity,
+    )
+
+    assert normalize_gender("Male") == "male"
+    assert normalize_gender("f") == "female"
+    assert normalize_gender("Other") == "other"
+    assert normalize_gender("") is None
+
+    # Gender similarity
+    assert gender_similarity("Male", "m") == 1.0
+    assert gender_similarity("Female", "male") == 0.0
+    assert gender_similarity(None, "male") is None
+
+    # Combined demographic similarity: age match + gender match = 1.0
+    sim_match = patient_info_similarity(age_q=30, age_c=30, gender_q="Male", gender_c="Male")
+    assert sim_match == 1.0
+
+    # Age match (1.0) + gender mismatch (0.0) = 0.5
+    sim_mismatch = patient_info_similarity(age_q=30, age_c=30, gender_q="Male", gender_c="Female")
+    assert sim_mismatch == 0.5
+
+    # Only age available
+    sim_age_only = patient_info_similarity(age_q=30, age_c=30, gender_q=None, gender_c=None)
+    assert sim_age_only == 1.0
+
+    # No demographics available -> None
+    assert patient_info_similarity(None, None, None, None) is None
+
+
+def test_rank_meds_filtering_and_cumulative_scoring():
+    from meldai.api.req_dtos import RankMoleculesRequest, SimilarityWeightsInput
+    from meldai.services.entity_matrix_service import rank_meds
+
+    # Candidate 1: Clinical sim 0.8 (match >= 0.5), Age 30 (sim 1.0), Gender Male (sim 1.0)
+    # -> Demographic sim = 1.0 -> Case score = 0.5 * 0.8 + 0.5 * 1.0 = 0.9. Meds: Med A, Med B
+    cand1 = {
+        "_id": "case1",
+        "chiefComplaints": [{"term": "insomnia", "hpoId": "HP:0002360"}],
+        "patientInfo": {"age": 30.0, "gender": "Male"},
+        "medications": [
+            {"canonical_molecule": "Med A", "name": "Med A"},
+            {"canonical_molecule": "Med B", "name": "Med B"},
+        ],
+    }
+
+    # Candidate 2: Clinical sim 0.6 (match >= 0.5), Age 30 (sim 1.0), Gender Female (sim 0.0)
+    # -> Demographic sim = 0.5 -> Case score = 0.5 * 0.6 + 0.5 * 0.5 = 0.55. Meds: Med A, Med C
+    cand2 = {
+        "_id": "case2",
+        "chiefComplaints": [{"term": "insomnia", "hpoId": "HP:0002360"}],
+        "patientInfo": {"age": 30.0, "gender": "Female"},
+        "medications": [
+            {"canonical_molecule": "Med A", "name": "Med A"},
+            {"canonical_molecule": "Med C", "name": "Med C"},
+        ],
+    }
+
+    # Candidate 3: Low clinical sim (< 0.5) -> must be FILTERED OUT
+    cand3 = {
+        "_id": "case3",
+        "chiefComplaints": [{"term": "headache", "hpoId": "HP:0002315"}],
+        "patientInfo": {"age": 30.0, "gender": "Male"},
+        "medications": [{"canonical_molecule": "Med D", "name": "Med D"}],
+    }
+
+    mock_kb = MagicMock()
+    mock_kb.find_similar_candidates.return_value = [cand1, cand2, cand3]
+
+    req = RankMoleculesRequest(
+        type="chiefComplaint",
+        query="insomnia",
+        patient_age=30.0,
+        patient_gender="Male",
+        weights=SimilarityWeightsInput(w_lca=0.5, w_vector=0.5, min_similarity=0.5),
+    )
+
+    with patch("meldai.services.entity_matrix_service.get_hpo_service") as mock_hpo_svc, \
+         patch("meldai.services.entity_matrix_service.get_sapbert_embedder") as mock_embedder, \
+         patch("meldai.services.entity_matrix_service.cosine_similarity") as mock_cos:
+
+        # Setup mock HPO search
+        mock_hit = MagicMock()
+        mock_hit.hpo_id = "HP:0002360"
+        mock_hit.label = "Sleep disturbance"
+        mock_hpo_svc.return_value.search.return_value = [mock_hit]
+
+        # Setup mock embedder
+        import numpy as np
+        mock_embedder.return_value.embed_entities.return_value = [np.zeros(768)]
+
+        # Mock cosine similarity: cand1 -> 0.6, cand2 -> 0.2, cand3 -> 0.0
+        # For cand1: lca=1.0, vec=0.6 -> clinical_sim = 0.5*1.0 + 0.5*0.6 = 0.8 (>= 0.5, match!)
+        # For cand2: lca=1.0, vec=0.2 -> clinical_sim = 0.5*1.0 + 0.5*0.2 = 0.6 (>= 0.5, match!)
+        # For cand3: lca=0.0, vec=0.1 -> clinical_sim = 0.05 (< 0.5, filtered!)
+        def side_effect_cos(q, e):
+            return 0.1
+        mock_cos.side_effect = lambda q, e: 0.1
+
+        # Patch compute_composite_score for predictable test assertions
+        with patch("meldai.services.entity_matrix_service.compute_composite_score") as mock_comp:
+            def comp_side_effect(scores, weights):
+                if scores["lca"] == 1.0:
+                    return 0.7  # clinical match
+                return 0.2  # below 0.5 cutoff
+            mock_comp.side_effect = comp_side_effect
+
+            resp = rank_meds(req, mongo_kb=mock_kb)
+
+    # Cand3 was filtered out -> only 2 similar cases analyzed
+    assert resp.similar_cases_count == 2
+    # Verify candidate molecules: Med A appears in both cases (cumulative score), Med B in case 1, Med C in case 2
+    molecules = {m.canonical_molecule: m for m in resp.molecules}
+    assert "Med A" in molecules
+    assert "Med B" in molecules
+    assert "Med C" in molecules
+    assert "Med D" not in molecules
+
+    # Med A has highest score and frequency
+    assert resp.molecules[0].canonical_molecule == "Med A"
+    assert resp.molecules[0].frequency == 2
+    assert molecules["Med A"].score > molecules["Med B"].score
+
 
 

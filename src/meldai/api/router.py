@@ -14,6 +14,7 @@ from meldai.api.req_dtos import (
     MedicineSearchRequest,
     PrescribeMedicationsRequest,
     PrescribeMedicationsV2Request,
+    RankMoleculesRequest,
     SegmentSymptomsRequest,
 )
 from meldai.api.res_dtos import (
@@ -31,6 +32,7 @@ from meldai.api.res_dtos import (
     PrescribeMedicationsV2Response,
     PrescribePipelineActionResponse,
     PrescribePipelineStatusResponse,
+    RankMoleculesResponse,
     SegmentSymptomsResponse,
     SymptomItem,
     SymptomMatchResult,
@@ -47,6 +49,7 @@ from meldai.services.case_service import CaseService
 from meldai.services.chief_complaints_runner import get_patient_migration_runner
 from meldai.services.prescribe_pipeline_runner import get_prescribe_pipeline_runner
 from meldai.services.gemini_service import get_gemini_service
+from meldai.services.entity_matrix_service import rank_meds
 from meldai.services.medicine_master_service import MedicineMasterService
 from meldai.services.migration_service import MigrationService
 from meldai.services.postgres_prescription_service import PostgresPrescriptionService
@@ -381,25 +384,31 @@ def match_symptoms_batch(
 
 
 # ---------------------------------------------------------------------------
-# Similar Cases Search & Case Decoration
+# Rank Molecules by Similarity (LCA + Vector + Patient Age Group)
 # ---------------------------------------------------------------------------
 
 @api_router.post(
-    "/cases/find-similar",
-    response_model=FindSimilarCaseResponse,
-    summary="Decorate a clinical case and find similar cases",
+    "/cases/rank-meds",
+    response_model=RankMoleculesResponse,
+    summary="Rank top-k molecules by prescription frequency from similar cases",
 )
-def find_similar_cases(
-    payload: FindSimilarCaseRequest,
-) -> FindSimilarCaseResponse:
-    """Enrich case symptoms and diagnoses with HPO/MONDO terms, fetch past visits, and retrieve similar cases."""
+def rank_medications(
+    payload: RankMoleculesRequest,
+) -> RankMoleculesResponse:
+    """Rank molecules by doctor prescribing frequency and similarity score across similar cases.
+
+    Pipeline:
+      1. Clinical similarity matching: LCA (Wu-Palmer) + Vector (SapBERT dense cosine).
+         Candidates below `min_similarity` cutoff (default 0.5) are filtered out.
+      2. Post-match ranking: Matched cases are sorted by combined case similarity and
+         patient demographic similarity (discrete age bands + Gaussian log-age kernel + gender match).
+      3. Cumulative molecule scoring: Prescribed molecules accumulate case scores and are ranked.
+    """
     try:
-        case_svc = _get_case_service()
-        mongo_kb = MongoKnowledgeBase()
-        return case_svc.find_similar_cases(payload, mongo_kb=mongo_kb)
+        return rank_meds(payload)
     except Exception as exc:
-        logger.error("Find similar cases failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Find similar cases failed: {str(exc)}")
+        logger.error("Rank meds failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Rank meds failed: {str(exc)}") from exc
 
 
 # ---------------------------------------------------------------------------

@@ -289,3 +289,33 @@ class PrescribeMedicationsV2Response(BaseModel):
         description="Complete prompt sent to the deprescribing LLM if review was performed",
     )
 
+
+# ---------------------------------------------------------------------------
+# Rank Molecules — Similar Case Retrieval & Frequency Aggregation
+# ---------------------------------------------------------------------------
+
+class RankedMoleculeItem(BaseModel):
+    """Ranked molecule or combination prescribed for similar cases."""
+
+    canonical_molecule: str = Field(..., description="Canonical molecule or FDC combination name")
+    is_fdc: bool = Field(default=False, description="True if fixed-dose combination")
+    score: float = Field(default=0.0, description="Cumulative similarity score across matching cases")
+    frequency: int = Field(..., description="Number of top similar cases where this was prescribed")
+    percentage: float = Field(..., description="Percentage of top similar cases prescribing this molecule")
+    avg_similarity: float = Field(..., description="Average composite similarity score of prescribing cases")
+    doctor_brands: List[str] = Field(default_factory=list, description="Brands the doctor used in those cases")
+
+
+class RankMoleculesResponse(BaseModel):
+    """Top molecules ranked by prescription frequency across similar cases."""
+
+    type: str = Field(..., description="Normalized entity type ('chiefComplaint' or 'diagnosis')")
+    query: str = Field(..., description="Query symptom or diagnosis term")
+    k: int = Field(..., description="Top-k limit returned")
+    curie: Optional[str] = Field(default=None, description="Resolved HPO or MONDO CURIE (e.g. HP:0002360)")
+    matched_term: Optional[str] = Field(default=None, description="Matched ontology term label")
+    similar_cases_count: int = Field(..., description="Number of top similar cases analyzed")
+    weights_applied: Dict[str, float] = Field(default_factory=dict, description="Normalized weights applied across components")
+    molecules: List[RankedMoleculeItem] = Field(default_factory=list, description="Ranked top-k molecules by frequency")
+
+
