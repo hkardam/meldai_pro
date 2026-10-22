@@ -583,3 +583,202 @@ def rank_meds(
         molecules=ranked_molecules[:request.k],
     )
 
+# ---------------------------------------------------------------------------
+# Per-entity rank helper — used by prescribe_medications_v2 (no LLM, no
+# MongoDB fetch; caller supplies a pre-filtered candidate pool)
+# ---------------------------------------------------------------------------
+
+def rank_meds_for_entity(
+    *,
+    query_term: str,
+    entity_type: str,           # "symptom" | "diagnosis"
+    query_code,
+    query_curie,
+    query_vector,
+    taxonomy,
+    candidates,
+    patient_age=None,
+    patient_gender=None,
+    w_lca: float = 0.5,
+    w_vec: float = 0.5,
+    min_sim: float = 0.5,
+    top_cases_limit: int = 20,
+    k: int = 10,
+):
+    """Score pre-fetched candidates for a single entity and return an EntityMoleculeRow.
+
+    Uses the same LCA + vector + demographic pipeline as ``rank_meds`` but
+    operates on an already-filtered candidate pool so callers can share one
+    DB fetch across all entities and avoid redundant MongoDB round-trips.
+
+    Parameters
+    ----------
+    query_term:       Raw entity string (symptom or diagnosis).
+    entity_type:      ``"symptom"`` (chief complaint) or ``"diagnosis"``.
+    query_code:       Numeric HPO/MONDO code resolved for the query term.
+    query_curie:      Full CURIE string (e.g. ``"HP:0002360"``).
+    query_vector:     SapBERT embedding for the query term (numpy array or list).
+    taxonomy:         HPO or MONDO TaxonomyIndex for Wu-Palmer LCA scoring.
+    candidates:       Pre-fetched (and pre-filtered) MongoDB case documents.
+    patient_age:      Current patient age in years (optional).
+    patient_gender:   Current patient gender string (optional).
+    w_lca / w_vec:    Composite scoring weights.
+    min_sim:          Minimum clinical similarity cutoff.
+    top_cases_limit:  How many top-scoring cases to aggregate molecules from.
+    k:                Cap on molecules to include in top_molecules.
+    """
+    from meldai.api.res_dtos import EntityMoleculeRow as _EMR
+
+    clean_type = entity_type  # "symptom" or "diagnosis"
+    clean_q_low = query_term.strip().lower()
+
+    scored_cases = []
+
+    for cand in candidates:
+        if clean_type == "symptom":
+            cand_entities = cand.get("chiefComplaints") or cand.get("symptoms") or []
+        else:
+            cand_entities = cand.get("diagnosis") or []
+
+        if not cand_entities:
+            continue
+
+        best_lca = 0.0
+        best_vec = 0.0
+
+        for e in cand_entities:
+            if isinstance(e, dict):
+                term = (e.get("term") or e.get("text") or "").strip().lower()
+                e_code = _parse_hpo_code(e) if clean_type == "symptom" else _parse_mondo_code(e)
+                e_vec = e.get("embedding")
+            else:
+                term = str(e).strip().lower()
+                e_code = None
+                e_vec = None
+
+            # LCA (Wu-Palmer)
+            if term == clean_q_low or (query_code is not None and e_code is not None and query_code == e_code):
+                lca_val = 1.0
+            elif taxonomy is not None and query_code is not None and e_code is not None:
+                lca_val = taxonomy.wu_palmer(query_code, e_code)
+            else:
+                lca_val = 0.0
+
+            if lca_val > best_lca:
+                best_lca = lca_val
+
+            # Vector (Cosine)
+            if term == clean_q_low:
+                vec_val = 1.0
+            elif query_vector is not None and e_vec is not None:
+                cos = cosine_similarity(query_vector, e_vec)
+                vec_val = max(cos, 0.0)
+            else:
+                vec_val = 0.0
+
+            if vec_val > best_vec:
+                best_vec = vec_val
+
+        clinical_sim = compute_composite_score(
+            {"lca": best_lca, "vector": best_vec},
+            {"lca": w_lca, "vector": w_vec},
+        )
+
+        if clinical_sim < min_sim:
+            continue
+
+        # Post-match demographic similarity
+        cand_age = None
+        cand_gender = None
+        p_info = cand.get("patientInfo")
+        if isinstance(p_info, dict):
+            cand_age = p_info.get("age")
+            cand_gender = p_info.get("gender")
+        if cand_age is None:
+            cand_age = cand.get("age")
+            if cand_age is None and isinstance(cand.get("patient"), dict):
+                cand_age = (
+                    cand["patient"].get("age", {}).get("year")
+                    if isinstance(cand["patient"].get("age"), dict)
+                    else cand["patient"].get("age")
+                )
+        if cand_gender is None:
+            cand_gender = cand.get("gender")
+            if cand_gender is None and isinstance(cand.get("patient"), dict):
+                cand_gender = cand["patient"].get("gender")
+
+        p_sim = patient_info_similarity(
+            age_q=patient_age,
+            age_c=cand_age,
+            gender_q=patient_gender,
+            gender_c=cand_gender,
+        )
+
+        case_score = (
+            round(0.5 * clinical_sim + 0.5 * p_sim, 4) if p_sim is not None
+            else round(clinical_sim, 4)
+        )
+
+        scored_cases.append({
+            "case_doc": cand,
+            "score": case_score,
+            "clinical_similarity": clinical_sim,
+        })
+
+    scored_cases.sort(key=lambda x: (x["score"], x["clinical_similarity"]), reverse=True)
+    top_cases = scored_cases[:top_cases_limit]
+
+    # Aggregate molecules from top cases
+    mol_counts = defaultdict(int)
+    mol_scores_map = defaultdict(list)
+    mol_brands = defaultdict(set)
+    mol_is_fdc = {}
+
+    for item in top_cases:
+        case_score = item["score"]
+        meds = _extract_meds_from_case(item["case_doc"])
+        seen_in_case = set()
+
+        for med in meds:
+            canon = med.get("canonical_molecule") or med.get("name")
+            if not canon:
+                continue
+            canon = canon.strip()
+            if canon.lower() in seen_in_case:
+                continue
+            seen_in_case.add(canon.lower())
+
+            mol_counts[canon] += 1
+            mol_scores_map[canon].append(case_score)
+            brand = med.get("brand_name") or med.get("name")
+            if brand and brand.strip() and brand.strip() != canon:
+                mol_brands[canon].add(brand.strip())
+            mol_is_fdc[canon] = med.get("is_fdc", False)
+
+    num_top = len(top_cases)
+    top_molecules = []
+    for canon, count in mol_counts.items():
+        scores_list = mol_scores_map[canon]
+        avg_sim = round(float(np.mean(scores_list)), 4) if scores_list else 0.0
+        total_score = round(float(np.sum(scores_list)), 4)
+        pct = round((count / num_top) * 100, 1) if num_top > 0 else 0.0
+        top_molecules.append({
+            "canonical_molecule": canon,
+            "is_fdc": mol_is_fdc.get(canon, False),
+            "frequency": count,
+            "percentage": pct,
+            "avg_similarity": avg_sim,
+            "score": total_score,
+            "doctor_brands": sorted(list(mol_brands[canon]))[:5],
+        })
+
+    top_molecules.sort(key=lambda x: (x["score"], x["frequency"], x["avg_similarity"]), reverse=True)
+
+    entity_type_label = "symptom" if clean_type == "symptom" else "diagnosis"
+    return _EMR(
+        entity=query_term,
+        entity_type=entity_type_label,
+        curie=query_curie,
+        top_molecules=top_molecules[:k],
+        attributed_molecules=[],
+    )

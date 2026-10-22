@@ -164,3 +164,38 @@ def save_response_to_tmp(
     return str(file_path)
 
 
+def parse_clinical_date(date_val: Any) -> Optional[datetime]:
+    """Robustly parse clinical encounter dates.
+
+    Handles:
+      - 'DD/MM/YYYY' (e.g. '08/10/2025', '12/09/2025')
+      - 'YYYY-MM-DD' (e.g. '2025-10-08')
+      - datetime / date objects
+      - other standard date strings with dateutil.parser (dayfirst=True)
+    """
+    if not date_val:
+        return None
+    from datetime import date, datetime
+    if isinstance(date_val, datetime):
+        return date_val
+    if isinstance(date_val, date):
+        return datetime.combine(date_val, datetime.min.time())
+
+    s = str(date_val).strip()
+    if not s or s.lower() in ("none", "null", "unknown"):
+        return None
+
+    try:
+        import re
+        from dateutil import parser
+        # Check standard DD/MM/YYYY or D/M/YYYY
+        if re.match(r"^\d{1,2}/\d{1,2}/\d{4}", s):
+            return parser.parse(s, dayfirst=True)
+        # Check standard YYYY-MM-DD
+        if re.match(r"^\d{4}-\d{1,2}-\d{1,2}", s):
+            return parser.parse(s, dayfirst=False)
+        return parser.parse(s, dayfirst=True)
+    except Exception:
+        return None
+
+

@@ -445,15 +445,32 @@ class MongoKnowledgeBase:
     def find_past_cases(self, case_no: int, before_date: str) -> List[Dict[str, Any]]:
         """Fetch all visits for a given caseNo whose visitDate is strictly before before_date.
 
-        Results are returned sorted by visitDate ascending (oldest first).
-        Relies on visitDate being stored as ISO 8601 strings ('YYYY-MM-DD') so that
-        lexicographic ordering equals chronological ordering.
+        Parses dates into datetime objects (handling both 'DD/MM/YYYY' and 'YYYY-MM-DD')
+        so that visits are strictly filtered (excluding today's encounter) and sorted
+        chronologically ascending (oldest first).
         """
-        cursor = self.cases.find(
-            {"caseNo": case_no, "visitDate": {"$lt": before_date}},
-            {"_id": 0},
-        ).sort("visitDate", ASCENDING)
-        return list(cursor)
+        from datetime import datetime
+        from meldai.utils import parse_clinical_date
+
+        cursor = self.cases.find({"caseNo": case_no}, {"_id": 0})
+        raw_docs = list(cursor)
+
+        before_dt = parse_clinical_date(before_date)
+        if before_dt is None:
+            before_dt = datetime.now()
+
+        past_cases: List[Tuple[datetime, Dict[str, Any]]] = []
+        for doc in raw_docs:
+            d_val = doc.get("visitDate") or doc.get("caseDate") or doc.get("date")
+            v_dt = parse_clinical_date(d_val)
+            if v_dt is not None:
+                # Strictly before encounter date (excludes today's visit)
+                if v_dt.date() < before_dt.date():
+                    past_cases.append((v_dt, doc))
+
+        # Sort chronologically ascending (oldest first)
+        past_cases.sort(key=lambda item: item[0])
+        return [doc for _, doc in past_cases]
 
     def update_cases_demographics_bulk(
         self, updates: List[Tuple[Any, Dict[str, Any]]]

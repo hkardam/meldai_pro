@@ -219,6 +219,10 @@ class EntityMoleculeRow(BaseModel):
     entity: str = Field(..., description="Symptom or diagnosis term")
     entity_type: str = Field(..., description="'symptom' or 'diagnosis'")
     curie: Optional[str] = Field(default=None, description="HPO or MONDO CURIE for the entity")
+    delta_status: Optional[str] = Field(
+        default=None,
+        description="Clinical change classification: 'new' | 'maintained' | 'decreased' | 'increased' | 'stop'",
+    )
     # Each item: {molecule, is_fdc, frequency, avg_similarity, doctor_brands}
     top_molecules: List[Dict[str, Any]] = Field(
         default_factory=list,
@@ -251,6 +255,21 @@ class DeprescribingRecommendation(BaseModel):
     )
 
 
+class ClinicalDeltaSummary(BaseModel):
+    """Clinical change delta between prior visits and current encounter."""
+
+    new_symptoms: List[str] = Field(default_factory=list, description="Newly presenting symptoms")
+    maintained_symptoms: List[str] = Field(default_factory=list, description="Persistent symptoms with stable severity")
+    decreased_symptoms: List[str] = Field(default_factory=list, description="Improving/milder symptoms")
+    increased_symptoms: List[str] = Field(default_factory=list, description="Worsening/more severe symptoms")
+    stop_symptoms: List[str] = Field(default_factory=list, description="Resolved symptoms absent in current visit")
+    new_diagnoses: List[str] = Field(default_factory=list, description="Newly identified diagnoses")
+    maintained_diagnoses: List[str] = Field(default_factory=list, description="Continued diagnoses")
+    stop_diagnoses: List[str] = Field(default_factory=list, description="Resolved diagnoses")
+    prior_medications: List[str] = Field(default_factory=list, description="Distinct medications from prior visits")
+    clinical_notes: str = Field(default="", description="Clinical synthesis note detailing change trajectory")
+
+
 class PrescribeMedicationsV2Response(BaseModel):
     """Full v2 clinical summary and encounter progression response."""
 
@@ -272,7 +291,7 @@ class PrescribeMedicationsV2Response(BaseModel):
         description="Per-entity top molecule breakdown used as matrix input to the final LLM",
     )
     # Delta summary for follow-up visits
-    history_delta: Optional[Dict[str, Any]] = Field(
+    history_delta: Optional[Union[ClinicalDeltaSummary, Dict[str, Any]]] = Field(
         default=None,
         description="Summary of what changed between past visits and the current encounter",
     )

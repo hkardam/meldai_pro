@@ -1,58 +1,79 @@
-"""Prescription Service V2 — Multi-Step Medication Reasoning.
+"""Prescription Service V2 — Per-Entity Molecule Ranking Orchestrator.
 
-Orchestrates four sequential LLM reasoning steps:
-
-  Step 1: Encounter diff (delta engine, pure Python — no LLM).
-  Step 2: Per-entity MongoDB retrieval + molecule frequency matrix.
-  Step 3: Deprescribing review (LLM — follow-up only).
-  Step 4: Regimen synthesis (LLM — final medication list).
-
-Similarities are computed against MongoDB cases using the existing
-hybrid LCA + SapBERT vector scorer from similarity_engine.py.
+Pipeline:
+  Step 1:  Decorate current case (HPO + MONDO + SapBERT embeddings).
+  Step 1b: Fetch patient's own past visits from MongoDB (delta context).
+  Step 2:  Compute clinical delta + generate human-readable clinical summary.
+  Step 3:  Fetch candidate pool from MongoDB — excluding the current patient
+           (by caseNo) and any records whose visitDate >= current visit date.
+  Step 4:  Delegate per-entity ontology resolution, change classification, and
+           molecule ranking to EntityRankingService (SRP / DIP).
+  -> Return entity_matrix directly — no LLM is called.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from meldai.api.req_dtos import PrescribeMedicationsV2Request, SimilarityParams
+from meldai.api.req_dtos import PrescribeMedicationsV2Request
 from meldai.api.res_dtos import (
-    DeprescribingRecommendation,
     EntityMoleculeRow,
     PrescribeMedicationsV2Response,
 )
 from meldai.config import Settings, get_settings
 from meldai.db.mongodb import MongoKnowledgeBase
+from meldai.nlp.sapbert import get_sapbert_embedder
 from meldai.services.case_service import CaseService
-from meldai.services.clinical_delta_service import compute_delta, generate_clinical_summary
-from meldai.services.entity_matrix_service import build_entity_matrix
+from meldai.services.clinical_delta_service import (
+    ChiefComplaintChangeService,
+    EntityRankingService,
+    compute_delta,
+    generate_clinical_summary,
+    heuristic_triage_complaint,
+)
 from meldai.services.gemini_service import GeminiService, get_gemini_service
+from meldai.terminology.hpo import get_hpo_service
+from meldai.terminology.mondo import get_mondo_service
 from meldai.terminology.taxonomy import get_hpo_taxonomy, get_mondo_taxonomy
-from meldai.utils import generate_run_id, save_prompt_to_tmp, save_response_to_tmp
+from meldai.utils import generate_run_id, parse_clinical_date, save_response_to_tmp
 
 logger = logging.getLogger(__name__)
 
-_DEPRESCRIBE_PROMPT_PATH = (
-    Path(__file__).resolve().parent / "prompts" / "medication_prediction" / "deprescribe_prompt.md"
-)
-_SYNTHESIS_PROMPT_PATH = (
-    Path(__file__).resolve().parent / "prompts" / "medication_prediction" / "regimen_synthesis_v2.md"
-)
-_MEDICINE_MASTER_PATH_DEFAULT = "data/medication/local_medicine_master.json"
 
+def _build_entity_ranking_service(settings: Settings) -> EntityRankingService:
+    """Factory: wire up and return an EntityRankingService from app settings.
 
-def _read_prompt(path: Path) -> str:
-    if path.is_file():
-        return path.read_text(encoding="utf-8").strip()
-    return ""
+    Isolated here (OCP) so that callers can swap any dependency without
+    touching PrescriptionServiceV2 itself.
+    """
+    embedder = get_sapbert_embedder(settings)
+    hpo_svc = get_hpo_service(settings.hpo_obo_path)
+    mondo_svc = get_mondo_service(settings.mondo_obo_path)
+
+    try:
+        hpo_taxonomy = get_hpo_taxonomy(settings.hpo_obo_path)
+    except Exception:
+        hpo_taxonomy = None
+    try:
+        mondo_taxonomy = get_mondo_taxonomy(settings.mondo_obo_path)
+    except Exception:
+        mondo_taxonomy = None
+
+    return EntityRankingService(
+        hpo_service=hpo_svc,
+        mondo_service=mondo_svc,
+        hpo_taxonomy=hpo_taxonomy,
+        mondo_taxonomy=mondo_taxonomy,
+        embedder=embedder,
+    )
 
 
 class PrescriptionServiceV2:
-    """Multi-step prescribing service."""
+    """Thin orchestrator — coordinates infrastructure calls and delegates
+    per-entity ranking to EntityRankingService (DIP).
+    """
 
     def __init__(
         self,
@@ -60,11 +81,21 @@ class PrescriptionServiceV2:
         case_service: Optional[CaseService] = None,
         mongo_kb: Optional[MongoKnowledgeBase] = None,
         gemini_service: Optional[GeminiService] = None,
+        entity_ranking_service: Optional[EntityRankingService] = None,
+        chief_complaint_service: Optional[ChiefComplaintChangeService] = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._case_service = case_service or CaseService(settings=self._settings)
         self._mongo_kb = mongo_kb
         self._gemini_service = gemini_service or get_gemini_service(self._settings)
+        self._chief_complaint_service = chief_complaint_service or ChiefComplaintChangeService(
+            gemini_service=self._gemini_service,
+            settings=self._settings,
+        )
+        # Injected or lazily built (DIP — callers can pass a mock for tests)
+        self._entity_ranking_svc = (
+            entity_ranking_service or _build_entity_ranking_service(self._settings)
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -75,229 +106,6 @@ class PrescriptionServiceV2:
             return self._mongo_kb
         return MongoKnowledgeBase(self._settings)
 
-    def _load_medicine_master(self) -> List[Dict[str, Any]]:
-        """Load the local medicine master JSON catalogue."""
-        path = Path(self._settings.medicine_master_json_path)
-        if not path.is_file():
-            # Try from repo root
-            repo_root = Path(__file__).resolve().parent.parent.parent.parent
-            path = repo_root / path
-        if path.is_file():
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        return data
-            except Exception as exc:
-                logger.warning("Failed to load medicine master: %s", exc)
-        return []
-
-    # ------------------------------------------------------------------
-    # Step 3: Deprescribing LLM
-    # ------------------------------------------------------------------
-
-    def _run_deprescribing_step(
-        self,
-        entity_prior_meds: Dict[str, Any],  # {entity_term: {"status": ..., "prior_meds": [...]}} or {entity_term: [prior_meds]}
-        run_id: str,
-    ) -> Tuple[List[DeprescribingRecommendation], Optional[str]]:
-        """Ask LLM to determine medication actions (stop | maintained | decreased | increased | new)."""
-        if not entity_prior_meds:
-            return [], None
-
-        system_prompt = _read_prompt(_DEPRESCRIBE_PROMPT_PATH)
-
-        # Build data section with entity, status, and prior medications
-        lines = ["### SYMPTOMS / DIAGNOSES AND PRIOR MEDICATIONS REVIEW:\n"]
-        for entity, info in entity_prior_meds.items():
-            if isinstance(info, dict):
-                status = info.get("status", "unknown")
-                meds = info.get("prior_meds", [])
-            else:
-                status = "unknown"
-                meds = info if isinstance(info, list) else []
-            meds_str = ", ".join(meds) if meds else "None recorded"
-            lines.append(f"- Entity: {entity} (Clinical Status: {status})")
-            lines.append(f"  Prior medications: {meds_str}\n")
-
-        data_section = "\n".join(lines)
-        full_prompt = f"{system_prompt}\n\n{data_section}"
-
-        save_prompt_to_tmp(full_prompt, run_id=f"{run_id}_deprescribe")
-
-        try:
-            raw_text, metrics = self._gemini_service.generate_content_with_metadata(full_prompt)
-            save_response_to_tmp(raw_text, run_id=f"{run_id}_deprescribe")
-        except Exception as exc:
-            logger.error("Deprescribing LLM call failed: %s", exc)
-            save_response_to_tmp(f"ERROR: {exc}", run_id=f"{run_id}_deprescribe")
-            return [], full_prompt
-
-        # Parse JSON array
-        try:
-            cleaned = raw_text.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("```", 2)[1]
-                if cleaned.startswith("json"):
-                    cleaned = cleaned[4:]
-            cleaned = cleaned.strip().rstrip("`").strip()
-            parsed = json.loads(cleaned)
-            if not isinstance(parsed, list):
-                parsed = parsed.get("deprescribing", []) if isinstance(parsed, dict) else []
-        except Exception as exc:
-            logger.warning("Failed to parse deprescribing LLM response: %s", exc)
-            return []
-
-        recommendations = []
-        for item in parsed:
-            if not isinstance(item, dict):
-                continue
-            raw_action = str(item.get("action", "maintained")).strip().lower()
-            if "stop" in raw_action:
-                norm_action = "stop"
-            elif "decreas" in raw_action or "taper" in raw_action:
-                norm_action = "decreased"
-            elif "increas" in raw_action or "escalat" in raw_action:
-                norm_action = "increased"
-            elif "new" in raw_action or "initiat" in raw_action:
-                norm_action = "new"
-            else:
-                norm_action = "maintained"
-
-            status_change = str(item.get("status_change", norm_action)).strip().lower()
-
-            try:
-                recommendations.append(DeprescribingRecommendation(
-                    medicine=item.get("medicine", ""),
-                    target_symptom=item.get("target_symptom", ""),
-                    status_change=status_change,
-                    action=norm_action,
-                    rationale=item.get("rationale", ""),
-                    taper_plan=item.get("taper_plan"),
-                ))
-            except Exception as exc:
-                logger.debug("Skipping malformed deprescribing item: %s — %s", item, exc)
-
-        logger.info("Deprescribing step: %d recommendations generated", len(recommendations))
-        return recommendations, full_prompt
-
-    # ------------------------------------------------------------------
-    # Step 4: Regimen Synthesis LLM
-    # ------------------------------------------------------------------
-
-    def _build_synthesis_prompt(
-        self,
-        request: PrescribeMedicationsV2Request,
-        entity_matrix: List[EntityMoleculeRow],
-        deprescribed: List[DeprescribingRecommendation],
-        delta: Dict[str, Any],
-        past_cases_count: int,
-        medicine_master: List[Dict[str, Any]],
-    ) -> str:
-        """Assemble the final synthesis prompt from all v2 components."""
-        system_text = _read_prompt(_SYNTHESIS_PROMPT_PATH)
-        lines: List[str] = []
-
-        if system_text:
-            lines.append(system_text)
-            lines.append("")
-
-        # --- Current encounter ---
-        case = request.case
-        is_followup = case.visitType.value == "follow-up"
-        lines.append("<data>")
-        lines.append("### CURRENT ENCOUNTER:")
-        lines.append(f"- Visit Type: {case.visitType.value}")
-        if case.caseNo:
-            lines.append(f"- Case No: {case.caseNo}")
-        age = case.patientInfo.age
-        gender = case.patientInfo.gender or "Unknown"
-        lines.append(f"- Demographics: Age: {age or 'Unknown'} years, Gender: {gender}")
-        lines.append(f"- Symptoms: {', '.join(case.symptoms) if case.symptoms else 'None'}")
-        lines.append(f"- Diagnoses: {', '.join(case.diagnosis) if case.diagnosis else 'None'}")
-        lines.append("")
-
-        # --- History delta (follow-up only) ---
-        if is_followup and delta:
-            lines.append("### HISTORY DELTA (what changed since last visit):")
-            lines.append(f"  {delta.get('summary_text', 'No changes detected.')}")
-            lines.append("")
-
-        # --- Entity medication matrix ---
-        lines.append("### ENTITY MEDICATION MATRIX (doctor's historical prescribing by entity):")
-        if entity_matrix:
-            for row in entity_matrix:
-                header = f"- [{row.entity_type.upper()}] {row.entity}"
-                if row.curie:
-                    header += f" ({row.curie})"
-                lines.append(header)
-                if row.top_molecules:
-                    for mol in row.top_molecules[:8]:  # cap at 8 per entity
-                        fdc_flag = " [FDC]" if mol.get("is_fdc") else ""
-                        brands = ", ".join(mol.get("doctor_brands", []))
-                        brands_note = f" | brands: {brands}" if brands else ""
-                        lines.append(
-                            f"    * {mol['canonical_molecule']}{fdc_flag} "
-                            f"| freq: {mol['frequency']} | similarity: {mol['avg_similarity']}"
-                            f"{brands_note}"
-                        )
-                else:
-                    lines.append("    * No historical data found for this entity.")
-                lines.append("")
-        else:
-            lines.append("  No entity matrix data available.")
-            lines.append("")
-
-        # --- Deprescribing / medication review plan ---
-        if deprescribed:
-            lines.append("### MEDICATION REVIEW & DEPRESCRIBING PLAN (stop | maintained | decreased | increased | new):")
-            for rec in deprescribed:
-                lines.append(f"- {rec.medicine}: {rec.action} (target entity: {rec.target_symptom}, status: {rec.status_change})")
-                lines.append(f"  Rationale: {rec.rationale}")
-                if rec.taper_plan:
-                    lines.append(f"  Adjustment/Taper: {rec.taper_plan}")
-            lines.append("")
-
-        lines.append("</data>")
-        lines.append("")
-
-        # --- Local formulary ---
-        if medicine_master:
-            lines.append("<medication-master>")
-            lines.append("```json")
-            lines.append(json.dumps(medicine_master, indent=2))
-            lines.append("```")
-            lines.append("</medication-master>")
-            lines.append("")
-
-        return "\n".join(lines)
-
-    def _parse_synthesis_response(self, raw_text: str) -> Dict[str, Any]:
-        """Parse the regimen synthesis LLM JSON response."""
-        cleaned = raw_text.strip()
-        import re
-        # Strip markdown code fences
-        block = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
-        candidate = block.group(1).strip() if block else cleaned
-        # Strip stray fences
-        if candidate.startswith("```"):
-            candidate = candidate[3:]
-        if candidate.startswith("json"):
-            candidate = candidate[4:]
-        candidate = candidate.strip().rstrip("`").strip()
-
-        try:
-            return json.loads(candidate)
-        except Exception:
-            outer = re.search(r"(\{[\s\S]*\})", candidate)
-            if outer:
-                try:
-                    return json.loads(outer.group(1))
-                except Exception:
-                    pass
-        logger.warning("Could not parse synthesis response as JSON.")
-        return {}
-
     # ------------------------------------------------------------------
     # Main public entry point
     # ------------------------------------------------------------------
@@ -306,28 +114,31 @@ class PrescriptionServiceV2:
         self,
         request: PrescribeMedicationsV2Request,
     ) -> PrescribeMedicationsV2Response:
-        """Run the full v2 multi-step prescribing pipeline."""
+        """Run the full v2 multi-step prescribing pipeline.
+
+        Steps:
+          1. Fetch patient's past visits from MongoDB (delta context).
+          2. Chief complaints change detection, 4-way triage & noise filtering.
+          3. Decorate current case (HPO + MONDO + SapBERT) using ONLY clean active symptoms.
+          4. Compute clinical delta & generate human-readable clinical summary.
+          5. Fetch candidate pool (excluding current patient + future visit dates).
+          6. Delegate to EntityRankingService.build_entity_matrix() — no LLM.
+        """
         mongo_kb = self._get_mongo()
         run_id = generate_run_id(case_no=request.case.caseNo)
-        is_followup = request.case.visitType.value == "follow-up"
+        vt_str = (
+            request.case.visitType.value
+            if hasattr(request.case.visitType, "value")
+            else str(request.case.visitType)
+        ).lower()
+        is_followup = vt_str in ("follow-up", "follow_up", "followup")
 
         # ---------------------------------------------------------------
-        # Step 1: Decorate current case (HPO + MONDO + SapBERT embeddings)
-        # ---------------------------------------------------------------
-        decorated_case = self._case_service.decorate_case(
-            case_no=request.case.caseNo,
-            patient_info=request.case.patientInfo,
-            symptoms=request.case.symptoms,
-            diagnosis=request.case.diagnosis,
-            visit_type=request.case.visitType.value,
-        )
-
-        # ---------------------------------------------------------------
-        # Step 1b: Fetch past visits (for follow-up delta and context)
+        # Step 1: Fetch past visits (for delta and clinical summary)
         # ---------------------------------------------------------------
         past_cases: List[Dict[str, Any]] = []
+        case_date = request.case.caseDate or datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if request.case.caseNo is not None:
-            case_date = request.case.caseDate or datetime.now(timezone.utc).strftime("%Y-%m-%d")
             try:
                 past_cases = mongo_kb.find_past_cases(
                     case_no=request.case.caseNo,
@@ -342,15 +153,47 @@ class PrescriptionServiceV2:
         )
 
         # ---------------------------------------------------------------
-        # Step 2: Clinical delta & Human-Readable Clinical Summary
+        # Step 2: Chief complaints triage & change detection (Keywords -> LLM)
+        # Filters out administrative metadata, to-do items, global status,
+        # and isolates genuine active symptoms from noise.
+        # ---------------------------------------------------------------
+        change_assessment = self._chief_complaint_service.assess_symptom_changes(
+            current_symptoms=request.case.symptoms,
+            past_cases=past_cases,
+            patient_info=request.case.patientInfo,
+            visit_type=request.case.visitType.value,
+            current_date=case_date,
+        )
+
+        # Extract only genuine, active symptom entities (isolating HPO/SapBERT from noise)
+        clean_symptom_entities: List[str] = (
+            change_assessment.active_symptoms
+            if change_assessment and change_assessment.active_symptoms is not None
+            else [s for s in request.case.symptoms if heuristic_triage_complaint(s)[0] == "symptom"]
+        )
+
+        # ---------------------------------------------------------------
+        # Step 3: Decorate current case (HPO + MONDO + SapBERT embeddings)
+        # Using ONLY clean active symptom entities
+        # ---------------------------------------------------------------
+        decorated_case = self._case_service.decorate_case(
+            case_no=request.case.caseNo,
+            patient_info=request.case.patientInfo,
+            symptoms=clean_symptom_entities,
+            diagnosis=request.case.diagnosis,
+            visit_type=request.case.visitType.value,
+        )
+
+        # ---------------------------------------------------------------
+        # Step 4: Compute clinical delta & generate human-readable clinical summary
         # ---------------------------------------------------------------
         delta = compute_delta(
             current_symptoms=request.case.symptoms,
             current_diagnoses=request.case.diagnosis,
             past_cases=past_cases,
+            change_assessment=change_assessment,
         )
 
-        case_date = request.case.caseDate or datetime.now(timezone.utc).strftime("%Y-%m-%d")
         clinical_summary = generate_clinical_summary(
             current_visit_type=request.case.visitType.value,
             patient_info=request.case.patientInfo,
@@ -358,22 +201,74 @@ class PrescriptionServiceV2:
             current_diagnoses=request.case.diagnosis,
             past_cases=past_cases,
             current_date=case_date,
+            change_assessment=change_assessment,
         )
 
         save_response_to_tmp(clinical_summary, run_id=f"{run_id}_clinical_summary")
-        logger.info("Generated clinical summary for caseNo=%s:\n%s", request.case.caseNo, clinical_summary)
+        if change_assessment and change_assessment.symptom_notes:
+            save_response_to_tmp(change_assessment.symptom_notes, run_id=f"{run_id}_symptom_notes")
+        logger.info("Clinical summary and symptom change assessment for caseNo=%s generated", request.case.caseNo)
+
+        # ---------------------------------------------------------------
+        # Step 5: Fetch candidate pool — excluding current patient's case
+        #         and any case whose visitDate >= current visit date.
+        # ---------------------------------------------------------------
+        candidate_pool_limit = getattr(request, "candidate_pool_limit", 500)
+        try:
+            raw_candidates = mongo_kb.find_similar_candidates(
+                exclude_case_no=request.case.caseNo,
+                limit=candidate_pool_limit,
+            )
+        except Exception as exc:
+            logger.warning("Failed fetching candidate pool: %s", exc)
+            raw_candidates = []
+
+        before_dt = parse_clinical_date(case_date)
+        candidates: List[Dict[str, Any]] = []
+        for c in raw_candidates:
+            c_date_val = c.get("visitDate") or c.get("caseDate")
+            if c_date_val and before_dt:
+                c_dt = parse_clinical_date(c_date_val)
+                if c_dt and c_dt.date() >= before_dt.date():
+                    continue
+            candidates.append(c)
+
+        logger.info(
+            "V2 prescribe: candidate pool size=%d (filtered from %d raw)",
+            len(candidates), len(raw_candidates),
+        )
+
+        # ---------------------------------------------------------------
+        # Step 6: Per-entity molecule ranking — delegated to EntityRankingService
+        # ---------------------------------------------------------------
+        patient_age: Optional[float] = (
+            request.case.patientInfo.age if request.case.patientInfo else None
+        )
+        patient_gender: Optional[str] = (
+            request.case.patientInfo.gender if request.case.patientInfo else None
+        )
+
+        entity_matrix: List[EntityMoleculeRow] = self._entity_ranking_svc.build_entity_matrix(
+            decorated_case=decorated_case,
+            candidates=candidates,
+            delta=delta,
+            past_cases=past_cases,
+            patient_age=patient_age,
+            patient_gender=patient_gender,
+            top_k=request.top_k_per_entity,
+        )
 
         return PrescribeMedicationsV2Response(
             clinical_summary=clinical_summary,
             consultation_type=request.case.visitType.value,
             medications=[],
             deprescribed_meds=[],
-            entity_matrix=[],
+            entity_matrix=entity_matrix,
             history_delta=delta if is_followup else None,
-            explanation=clinical_summary,
+            explanation=delta.get("clinical_notes") or clinical_summary,
             past_cases_count=len(past_cases),
             run_id=run_id,
             metrics={},
-            end_prompt=clinical_summary,
+            end_prompt=None,
             deprescribe_prompt=None,
         )
