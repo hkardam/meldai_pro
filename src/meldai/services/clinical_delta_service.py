@@ -363,6 +363,7 @@ class ClinicalChangeAssessment:
     symptom_notes: str = ""
     raw_llm_response: Optional[str] = None
     used_llm: bool = False
+    llm_prompt: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +398,8 @@ def compute_delta(
                 if cat == "symptom":
                     cur_syms.append(canon or s.strip())
 
-        cur_dxs = [d.strip() for d in current_diagnoses if d.strip()]
+        from meldai.utils import clean_diagnosis_term
+        cur_dxs = [clean_diagnosis_term(d) for d in current_diagnoses if clean_diagnosis_term(d)]
         notes = ""
         if change_assessment:
             notes = change_assessment.symptom_notes or change_assessment.patient_condition
@@ -429,7 +431,8 @@ def compute_delta(
         dxs = visit.get("diagnosis") or []
         for d in dxs:
             t = (d.get("term") or d.get("text") or "") if isinstance(d, dict) else str(d)
-            t = t.strip().lower()
+            from meldai.utils import clean_diagnosis_term
+            t = clean_diagnosis_term(t).lower()
             if t:
                 all_past_diagnoses.append(t)
 
@@ -576,7 +579,8 @@ def compute_delta(
     # ------------------------------------------------------------------
     # Classify diagnoses: stop | maintained | new (no severity tracking)
     # ------------------------------------------------------------------
-    cur_dx_lower = {d.strip().lower(): d for d in current_diagnoses if d.strip()}
+    from meldai.utils import clean_diagnosis_term
+    cur_dx_lower = {clean_diagnosis_term(d).lower(): clean_diagnosis_term(d) for d in current_diagnoses if clean_diagnosis_term(d)}
     new_diagnoses: List[str] = []
     maintained_diagnoses: List[str] = []
     stop_diagnoses: List[str] = []
@@ -706,10 +710,12 @@ def generate_clinical_summary(
     # 3. Current diagnosis
     lines.append("current diagnosis:")
     if current_diagnoses:
+        from meldai.utils import clean_diagnosis_term
         for d in current_diagnoses:
             d_str = (d.get("term") or d.get("text") or "") if isinstance(d, dict) else str(d)
-            if d_str.strip():
-                lines.append(f"- {d_str.strip().lower()}")
+            cleaned_d = clean_diagnosis_term(d_str)
+            if cleaned_d:
+                lines.append(f"- {cleaned_d.lower()}")
     else:
         lines.append("none recorded")
 
@@ -904,11 +910,18 @@ class ChiefComplaintChangeService:
             current_date=current_date,
         )
 
-        raw_text, _metrics = gemini.generate_content_with_metadata(prompt, temperature=0.0)
+        raw_text, _metrics = gemini.generate_content_with_metadata(
+            prompt,
+            temperature=0.0,
+            call_name="triage_symptom_changes",
+        )
         if not raw_text or not raw_text.strip():
             return None
 
-        return self._parse_llm_response(raw_text, keyword_results)
+        assessment = self._parse_llm_response(raw_text, keyword_results)
+        if assessment is not None:
+            assessment.llm_prompt = prompt
+        return assessment
 
     def _build_llm_prompt(
         self,
@@ -1427,8 +1440,10 @@ class EntityRankingService:
                     past_symptom_terms.add(t.strip())
             for d in visit.get("diagnosis", []):
                 t = (d.get("term") or d.get("text") or "") if isinstance(d, dict) else str(d)
-                if t.strip():
-                    past_diagnosis_terms.add(t.strip())
+                from meldai.utils import clean_diagnosis_term
+                cleaned_d = clean_diagnosis_term(t)
+                if cleaned_d:
+                    past_diagnosis_terms.add(cleaned_d)
 
         entity_matrix: List[EntityMoleculeRow] = []
 

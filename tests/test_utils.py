@@ -35,3 +35,24 @@ def test_segment_with_sanitization():
 def test_segment_empty_or_whitespace():
     assert segment("") == []
     assert segment(" .  \n ●   ") == []
+
+
+def test_clean_diagnosis_term():
+    from meldai.utils import clean_diagnosis_term
+
+    # Target test case requested by user
+    assert clean_diagnosis_term("? mdd with anxious distress") == "mdd with anxious distress"
+
+    # Various leading and trailing special characters
+    assert clean_diagnosis_term("?? MDD with anxious distress??") == "MDD with anxious distress"
+    assert clean_diagnosis_term("- ? mdd with anxious distress . ") == "mdd with anxious distress"
+    assert clean_diagnosis_term("(bipolar affective disorder)") == "bipolar affective disorder"
+    assert clean_diagnosis_term("!schizophrenia...") == "schizophrenia"
+    assert clean_diagnosis_term("  major depressive disorder  ") == "major depressive disorder"
+
+    # Single letter or empty / non-string
+    assert clean_diagnosis_term("a") == "a"
+    assert clean_diagnosis_term("? a !") == "a"
+    assert clean_diagnosis_term("???") == ""
+    assert clean_diagnosis_term("") == ""
+    assert clean_diagnosis_term(None) == ""

@@ -270,25 +270,36 @@ class ClinicalDeltaSummary(BaseModel):
     clinical_notes: str = Field(default="", description="Clinical synthesis note detailing change trajectory")
 
 
+class LLMStepCall(BaseModel):
+    """Container for prompt and output of a workflow LLM step."""
+
+    prompt: Optional[str] = Field(default=None, description="Complete prompt sent to the LLM")
+    output: Any = Field(default=None, description="Structured parsed response or output received from the LLM")
+
+
 class PrescribeMedicationsV2Response(BaseModel):
     """Full v2 clinical summary and encounter progression response."""
 
     clinical_summary: str = Field(default="", description="Human-readable text of clinical summary for the case")
-    consultation_type: str = Field(..., description="'new_consultation' or 'follow_up'")
-    # Final medications recommended (new or continued) — same structure as v1 medications list
+    # Step 1: LLM Check & Target Entities / Missing Meds
+    llmMedCheck: Optional[LLMStepCall] = Field(
+        default=None,
+        description="Step 1: Check medications targeting entities and select top molecules for empty entities",
+    )
+    # Step 2: LLM Prescribing Synthesis with updated entity matrix
+    llmMedPrescribe: Optional[LLMStepCall] = Field(
+        default=None,
+        description="Step 2: Senior Consultant Indian Psychiatrist prescribing synthesis based on active_prompt.md",
+    )
+    # Final medications recommended (new or continued)
     medications: List[Union[Dict[str, Any], str]] = Field(
         default_factory=list,
         description="Final recommended medication master objects or molecule/brand name strings",
     )
-    # Medications to stop or taper (follow-up only)
-    deprescribed_meds: List[DeprescribingRecommendation] = Field(
-        default_factory=list,
-        description="Prior medications recommended for stopping or tapering",
-    )
-    # Per-entity matrix showing which molecules were considered for each symptom/diagnosis
+    # Updated Per-entity matrix showing which molecules were considered for each symptom/diagnosis
     entity_matrix: List[EntityMoleculeRow] = Field(
         default_factory=list,
-        description="Per-entity top molecule breakdown used as matrix input to the final LLM",
+        description="Per-entity top molecule breakdown updated after Step 1 LLM check",
     )
     # Delta summary for follow-up visits
     history_delta: Optional[Union[ClinicalDeltaSummary, Dict[str, Any]]] = Field(
@@ -299,13 +310,13 @@ class PrescribeMedicationsV2Response(BaseModel):
     past_cases_count: int = Field(default=0, description="Number of prior patient visits used")
     run_id: Optional[str] = Field(default=None, description="Run ID for prompt/response trace files in tmp/")
     metrics: Dict[str, Any] = Field(default_factory=dict, description="LLM token usage, cost, and response time")
-    end_prompt: Optional[str] = Field(
+    workflow_prompts_file: Optional[str] = Field(
         default=None,
-        description="Complete end prompt with all data sections sent to the final synthesis LLM",
+        description="Absolute file path where all prompts used across the workflow were stored",
     )
-    deprescribe_prompt: Optional[str] = Field(
+    llm_log_file: Optional[str] = Field(
         default=None,
-        description="Complete prompt sent to the deprescribing LLM if review was performed",
+        description="Absolute file path where all LLM calls (req + res) for this run were logged",
     )
 
 

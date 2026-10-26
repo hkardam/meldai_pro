@@ -12,7 +12,7 @@ from meldai.api.req_dtos import PrescribeMedicationsRequest
 from meldai.api.res_dtos import DecoratedCase, PrescribeMedicationsResponse
 from meldai.config import Settings, get_settings
 from meldai.db.postgres import PostgresSource
-from meldai.services.gemini_service import GeminiService, get_gemini_service
+from meldai.services.gemini_service import GeminiService, get_gemini_service, set_llm_run_context
 from meldai.services.case_service import CaseService
 from meldai.utils import generate_run_id, save_prompt_to_tmp, save_response_to_tmp, to_curie
 
@@ -460,7 +460,8 @@ class PostgresPrescriptionService:
         case_input = request.case
 
         clean_symptoms = [s.strip() for s in case_input.symptoms if s and s.strip()]
-        clean_diagnoses = [d.strip() for d in case_input.diagnosis if d and d.strip()]
+        from meldai.utils import clean_diagnosis_term
+        clean_diagnoses = [clean_diagnosis_term(d) for d in case_input.diagnosis if clean_diagnosis_term(d)]
 
         # Validation requirement: at least 1 symptom and 1 diagnosis required
         if not clean_diagnoses or not clean_symptoms:
@@ -508,11 +509,16 @@ class PostgresPrescriptionService:
 
         # 4. Generate run ID and save executed prompt to tmp file
         run_id = generate_run_id(case_no=decorated_case.caseNo)
+        set_llm_run_context(run_id, call_name="postgres_prescription_synthesis")
         save_prompt_to_tmp(prompt, run_id=run_id)
 
         # 5. Call Gemini LLM and dump raw response to tmp file
         try:
-            llm_result = self._gemini_service.generate_prescription(prompt, run_id=run_id)
+            llm_result = self._gemini_service.generate_prescription(
+                prompt,
+                run_id=run_id,
+                call_name="postgres_prescription_synthesis",
+            )
             save_response_to_tmp(llm_result.get("raw_response", ""), run_id=run_id)
         except Exception as exc:
             save_response_to_tmp(f"ERROR: {exc}", run_id=run_id)

@@ -749,9 +749,14 @@
               "body": "{\n  \"type\": \"chiefComplaint\",\n  \"query\": \"insomnia\",\n  \"k\": 5,\n  \"curie\": \"HP:0002360\",\n  \"matched_term\": \"Sleep disturbance\",\n  \"similar_cases_count\": 20,\n  \"weights_applied\": {\n    \"w_lca\": 0.5,\n    \"w_vector\": 0.5,\n    \"min_similarity\": 0.5,\n    \"patient_info_used\": 1.0\n  },\n  \"molecules\": [\n    {\n      \"canonical_molecule\": \"Zolpidem\",\n      \"is_fdc\": false,\n      \"score\": 12.32,\n      \"frequency\": 14,\n      \"percentage\": 70.0,\n      \"avg_similarity\": 0.88,\n      \"doctor_brands\": [\n        \"ZOLFRESH\",\n        \"ZOLRIN\"\n      ]\n    },\n    {\n      \"canonical_molecule\": \"Etizolam\",\n      \"is_fdc\": false,\n      \"score\": 7.38,\n      \"frequency\": 9,\n      \"percentage\": 45.0,\n      \"avg_similarity\": 0.82,\n      \"doctor_brands\": [\n        \"ZOLAVIL\",\n        \"ETICALM\"\n      ]\n    }\n  ]\n}"
             }
           ]
-        },
+        }
+      ]
+    },
+    {
+      "name": "Prescription & Batch Pipelines",
+      "item": [
         {
-          "name": "Prescribe Medications (Gemini LLM)",
+          "name": "[V1] Prescribe Medications (PostgreSQL + Gemini LLM)",
           "request": {
             "method": "POST",
             "header": [
@@ -812,6 +817,666 @@
                 }
               ],
               "body": "{\n  \"medications\": [\n    \"Melatonin 3mg\",\n    \"Zolpidem 5mg\"\n  ],\n  \"explanation\": \"Medications selected for adult patient presenting with insomnia and fatigue, matching doctor's historical prescription pattern in similar encounters.\",\n  \"pastCasesCount\": 1,\n  \"similarCasesCount\": 3\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V1] Start Prescribe Pipeline (Background Batch)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/start",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cases",
+                "prescribe-pipeline",
+                "start"
+              ]
+            },
+            "description": "Start the V1 background pipeline that runs legacy SQL-driven prescribe_medications for cases in prescribe-request-all-cases.json."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/start",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "cases",
+                    "prescribe-pipeline",
+                    "start"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"started\",\n  \"message\": \"Prescribe pipeline started in background.\",\n  \"run_id\": \"9421de3fac10\",\n  \"result_file\": \"/app/tmp/prescribe_pipeline_20261026_120000.json\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V1] Stop Prescribe Pipeline",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/stop",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cases",
+                "prescribe-pipeline",
+                "stop"
+              ]
+            },
+            "description": "Signal the active V1 prescribe pipeline to stop after the current case finishes."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/stop",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "cases",
+                    "prescribe-pipeline",
+                    "stop"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"stopping\",\n  \"message\": \"Stop signal sent. Pipeline will halt after the current case. Results written so far are preserved.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V1] Get Prescribe Pipeline Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cases",
+                "prescribe-pipeline",
+                "status"
+              ]
+            },
+            "description": "Poll the state, counters, current case, and output path for the V1 pipeline."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/status",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "cases",
+                    "prescribe-pipeline",
+                    "status"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"running\",\n  \"run_id\": \"9421de3fac10\",\n  \"total_cases\": 95,\n  \"processed_cases\": 32,\n  \"passed_cases\": 32,\n  \"failed_cases\": 0,\n  \"current_case_no\": 101,\n  \"result_file\": \"/app/tmp/prescribe_pipeline_20261026_120000.json\",\n  \"elapsed_seconds\": 120.0,\n  \"error\": null\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V2] Prescribe Medications (Multi-Step Reasoning)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"case\": {\n    \"caseNo\": 332,\n    \"caseDate\": \"2026-01-24\",\n    \"visitType\": \"new consultation\",\n    \"patientInfo\": {\n      \"age\": 37.0,\n      \"gender\": \"Male\"\n    },\n    \"symptoms\": [\n      \"Sadness of mood, anxiety. restlessness. Total duration: 1.5 years, increased since 1.5 months\",\n      \"Severe insomnia\",\n      \"Occasional death wishes\"\n    ],\n    \"diagnosis\": [\n      \"MDD WITH ANXIOUS DISTRESS\",\n      \"INSOMNIA\"\n    ]\n  },\n  \"top_k_per_entity\": 5,\n  \"enable_deprescribing\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v2/cases/prescribe-medications",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v2",
+                "cases",
+                "prescribe-medications"
+              ]
+            },
+            "description": "V2 Multi-Step Medication Reasoning: performs patient history delta, chief complaints triage, case decoration via HPO/MONDO/SapBERT, per-entity candidate ranking, Step 1 LLM med check, Step 2 LLM prescribing synthesis, and medicine master enrichment."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v2/cases/prescribe-medications",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v2",
+                    "cases",
+                    "prescribe-medications"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"clinical_summary\": \"37yo Male presenting for new consultation with MDD WITH ANXIOUS DISTRESS and INSOMNIA. Reports 1.5 years of depressive symptoms, severe insomnia, and occasional death wishes.\",\n  \"llmMedCheck\": {\n    \"prompt\": \"ROLE: Clinical psychopharmacology assistant reviewing candidate medications...\",\n    \"output\": {\n      \"entity_medication_check\": [\n        {\n          \"entity\": \"Severe insomnia\",\n          \"attributed_molecules\": [\n            \"Clonazepam\",\n            \"Quetiapine\"\n          ],\n          \"recommended_top_molecules\": [\n            {\n              \"canonical_molecule\": \"Zolpidem\",\n              \"is_fdc\": false,\n              \"doctor_brands\": [\n                \"ZOLAST\"\n              ],\n              \"score\": 0.88\n            }\n          ]\n        }\n      ]\n    }\n  },\n  \"llmMedPrescribe\": {\n    \"prompt\": \"ROLE: Assistant system for a psychiatrist practicing in India...\",\n    \"output\": {\n      \"medications\": [\n        {\n          \"brand_name\": \"LERITHIUM\",\n          \"canonical_molecule\": \"Lithium Carbonate\"\n        },\n        {\n          \"brand_name\": \"REVEN XR\",\n          \"canonical_molecule\": \"Venlafaxine\"\n        }\n      ],\n      \"explanation\": \"Standard therapeutic anchor for treatment-resistant major depression with anxious distress.\"\n    }\n  },\n  \"medications\": [\n    {\n      \"brand_name\": \"LERITHIUM\",\n      \"canonical_molecule\": \"Lithium Carbonate\",\n      \"is_fdc\": false,\n      \"constituent_strengths_mg\": {\n        \"Lithium Carbonate\": 400.0\n      },\n      \"modal_strength_mg\": 400.0,\n      \"release_form\": \"SR\",\n      \"dosage_tier\": \"STANDARD_MAINTENANCE\",\n      \"dosage_group_id\": \"GRP_LITHIUM_SR\",\n      \"clinical_dosing_indication\": \"Sustained-release maintenance mood stabilizer for affective disorder.\"\n    },\n    {\n      \"brand_name\": \"REVEN XR\",\n      \"canonical_molecule\": \"Venlafaxine\",\n      \"is_fdc\": false,\n      \"constituent_strengths_mg\": {\n        \"Venlafaxine\": 75.0\n      },\n      \"modal_strength_mg\": 75.0,\n      \"release_form\": \"ER\",\n      \"dosage_tier\": \"STANDARD_MAINTENANCE\",\n      \"dosage_group_id\": \"GRP_VENLAFAXINE_ER_75\",\n      \"clinical_dosing_indication\": \"Extended-release SNRI formulation for major depression and generalized anxiety.\"\n    }\n  ],\n  \"entity_matrix\": [\n    {\n      \"entity\": \"Severe insomnia\",\n      \"entity_type\": \"symptom\",\n      \"curie\": \"HP:0002360\",\n      \"delta_status\": \"NEW\",\n      \"top_molecules\": [\n        {\n          \"canonical_molecule\": \"Clonazepam\",\n          \"is_fdc\": false,\n          \"frequency\": 24,\n          \"percentage\": 48.0,\n          \"score\": 0.85,\n          \"doctor_brands\": [\n            \"CECON\",\n            \"CLONATOP\"\n          ]\n        }\n      ],\n      \"attributed_molecules\": [\n        \"Clonazepam\"\n      ]\n    }\n  ],\n  \"explanation\": \"Patient presents with persistent severe depression and anxiety with insomnia. Venlafaxine ER anchor is prescribed alongside Lithium Carbonate mood stabilizer.\",\n  \"past_cases_count\": 0,\n  \"run_id\": \"case_332_20261026_120000_abc123\",\n  \"metrics\": {\n    \"response_time_seconds\": 15.34,\n    \"tokens_used\": {\n      \"prompt_tokens\": 14200,\n      \"candidates_tokens\": 820,\n      \"total_tokens\": 15020\n    },\n    \"cost_usd\": 0.00341,\n    \"two_step_execution\": true\n  },\n  \"workflow_prompts_file\": \"/app/tmp/case_332_20261026_120000_abc123_all_prompts.txt\",\n  \"llm_log_file\": \"/app/tmp/case_332_20261026_120000_abc123_llm_logs.json\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V2] Prescribe Medications (V1 Route Alias)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"case\": {\n    \"caseNo\": 332,\n    \"caseDate\": \"2026-01-24\",\n    \"visitType\": \"new consultation\",\n    \"patientInfo\": {\n      \"age\": 37.0,\n      \"gender\": \"Male\"\n    },\n    \"symptoms\": [\n      \"Sadness of mood, anxiety. restlessness. Total duration: 1.5 years, increased since 1.5 months\",\n      \"Severe insomnia\",\n      \"Occasional death wishes\"\n    ],\n    \"diagnosis\": [\n      \"MDD WITH ANXIOUS DISTRESS\",\n      \"INSOMNIA\"\n    ]\n  },\n  \"top_k_per_entity\": 5,\n  \"enable_deprescribing\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/cases/prescribe-medications/v2",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cases",
+                "prescribe-medications",
+                "v2"
+              ]
+            },
+            "description": "Direct alias under /api/v1 for V2 multi-step prescribe medications."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/cases/prescribe-medications/v2",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "cases",
+                    "prescribe-medications",
+                    "v2"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"clinical_summary\": \"37yo Male presenting for new consultation with MDD WITH ANXIOUS DISTRESS and INSOMNIA. Reports 1.5 years of depressive symptoms, severe insomnia, and occasional death wishes.\",\n  \"llmMedCheck\": {\n    \"prompt\": \"ROLE: Clinical psychopharmacology assistant reviewing candidate medications...\",\n    \"output\": {\n      \"entity_medication_check\": [\n        {\n          \"entity\": \"Severe insomnia\",\n          \"attributed_molecules\": [\n            \"Clonazepam\",\n            \"Quetiapine\"\n          ],\n          \"recommended_top_molecules\": [\n            {\n              \"canonical_molecule\": \"Zolpidem\",\n              \"is_fdc\": false,\n              \"doctor_brands\": [\n                \"ZOLAST\"\n              ],\n              \"score\": 0.88\n            }\n          ]\n        }\n      ]\n    }\n  },\n  \"llmMedPrescribe\": {\n    \"prompt\": \"ROLE: Assistant system for a psychiatrist practicing in India...\",\n    \"output\": {\n      \"medications\": [\n        {\n          \"brand_name\": \"LERITHIUM\",\n          \"canonical_molecule\": \"Lithium Carbonate\"\n        },\n        {\n          \"brand_name\": \"REVEN XR\",\n          \"canonical_molecule\": \"Venlafaxine\"\n        }\n      ],\n      \"explanation\": \"Standard therapeutic anchor for treatment-resistant major depression with anxious distress.\"\n    }\n  },\n  \"medications\": [\n    {\n      \"brand_name\": \"LERITHIUM\",\n      \"canonical_molecule\": \"Lithium Carbonate\",\n      \"is_fdc\": false,\n      \"constituent_strengths_mg\": {\n        \"Lithium Carbonate\": 400.0\n      },\n      \"modal_strength_mg\": 400.0,\n      \"release_form\": \"SR\",\n      \"dosage_tier\": \"STANDARD_MAINTENANCE\",\n      \"dosage_group_id\": \"GRP_LITHIUM_SR\",\n      \"clinical_dosing_indication\": \"Sustained-release maintenance mood stabilizer for affective disorder.\"\n    },\n    {\n      \"brand_name\": \"REVEN XR\",\n      \"canonical_molecule\": \"Venlafaxine\",\n      \"is_fdc\": false,\n      \"constituent_strengths_mg\": {\n        \"Venlafaxine\": 75.0\n      },\n      \"modal_strength_mg\": 75.0,\n      \"release_form\": \"ER\",\n      \"dosage_tier\": \"STANDARD_MAINTENANCE\",\n      \"dosage_group_id\": \"GRP_VENLAFAXINE_ER_75\",\n      \"clinical_dosing_indication\": \"Extended-release SNRI formulation for major depression and generalized anxiety.\"\n    }\n  ],\n  \"entity_matrix\": [\n    {\n      \"entity\": \"Severe insomnia\",\n      \"entity_type\": \"symptom\",\n      \"curie\": \"HP:0002360\",\n      \"delta_status\": \"NEW\",\n      \"top_molecules\": [\n        {\n          \"canonical_molecule\": \"Clonazepam\",\n          \"is_fdc\": false,\n          \"frequency\": 24,\n          \"percentage\": 48.0,\n          \"score\": 0.85,\n          \"doctor_brands\": [\n            \"CECON\",\n            \"CLONATOP\"\n          ]\n        }\n      ],\n      \"attributed_molecules\": [\n        \"Clonazepam\"\n      ]\n    }\n  ],\n  \"explanation\": \"Patient presents with persistent severe depression and anxiety with insomnia. Venlafaxine ER anchor is prescribed alongside Lithium Carbonate mood stabilizer.\",\n  \"past_cases_count\": 0,\n  \"run_id\": \"case_332_20261026_120000_abc123\",\n  \"metrics\": {\n    \"response_time_seconds\": 15.34,\n    \"tokens_used\": {\n      \"prompt_tokens\": 14200,\n      \"candidates_tokens\": 820,\n      \"total_tokens\": 15020\n    },\n    \"cost_usd\": 0.00341,\n    \"two_step_execution\": true\n  },\n  \"workflow_prompts_file\": \"/app/tmp/case_332_20261026_120000_abc123_all_prompts.txt\",\n  \"llm_log_file\": \"/app/tmp/case_332_20261026_120000_abc123_llm_logs.json\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V2] Start Prescribe Pipeline (95-Case Multi-Step Reasoning)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v2/cases/prescribe-pipeline/start",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v2",
+                "cases",
+                "prescribe-pipeline",
+                "start"
+              ]
+            },
+            "description": "Start the V2 background batch pipeline running multi-step reasoning across all 95 unique cases in prescribe-request-all-cases.json. Writes incremental results with prompts, req, and res into tmp/."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v2/cases/prescribe-pipeline/start",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v2",
+                    "cases",
+                    "prescribe-pipeline",
+                    "start"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"started\",\n  \"message\": \"Prescribe pipeline V2 started in background.\",\n  \"run_id\": \"8348dc1cbcc9\",\n  \"result_file\": \"/app/tmp/prescribe_pipeline_v2_20261026_120000.json\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V2] Stop Prescribe Pipeline",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v2/cases/prescribe-pipeline/stop",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v2",
+                "cases",
+                "prescribe-pipeline",
+                "stop"
+              ]
+            },
+            "description": "Signal the active V2 prescribe pipeline to gracefully halt after the current case finishes."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v2/cases/prescribe-pipeline/stop",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v2",
+                    "cases",
+                    "prescribe-pipeline",
+                    "stop"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"stopping\",\n  \"message\": \"Stop signal sent. Pipeline V2 will halt after the current case. Results written so far are preserved.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V2] Get Prescribe Pipeline Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v2/cases/prescribe-pipeline/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v2",
+                "cases",
+                "prescribe-pipeline",
+                "status"
+              ]
+            },
+            "description": "Poll the progress counters, current case number, elapsed time, and result file path for the active V2 pipeline."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v2/cases/prescribe-pipeline/status",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v2",
+                    "cases",
+                    "prescribe-pipeline",
+                    "status"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"running\",\n  \"run_id\": \"8348dc1cbcc9\",\n  \"version\": \"v2\",\n  \"total_cases\": 95,\n  \"processed_cases\": 15,\n  \"passed_cases\": 15,\n  \"failed_cases\": 0,\n  \"current_case_no\": 332,\n  \"result_file\": \"/app/tmp/prescribe_pipeline_v2_20261026_120000.json\",\n  \"elapsed_seconds\": 210.5,\n  \"error\": null\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V2] Start Prescribe Pipeline (V1 Route Alias)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/v2/start",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cases",
+                "prescribe-pipeline",
+                "v2",
+                "start"
+              ]
+            },
+            "description": "Start the V2 batch pipeline using the /api/v1 URL namespace."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/v2/start",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "cases",
+                    "prescribe-pipeline",
+                    "v2",
+                    "start"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"started\",\n  \"message\": \"Prescribe pipeline V2 started in background.\",\n  \"run_id\": \"8348dc1cbcc9\",\n  \"result_file\": \"/app/tmp/prescribe_pipeline_v2_20261026_120000.json\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V2] Stop Prescribe Pipeline (V1 Route Alias)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/v2/stop",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cases",
+                "prescribe-pipeline",
+                "v2",
+                "stop"
+              ]
+            },
+            "description": "Stop the V2 batch pipeline using the /api/v1 URL namespace."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/v2/stop",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "cases",
+                    "prescribe-pipeline",
+                    "v2",
+                    "stop"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"stopping\",\n  \"message\": \"Stop signal sent. Pipeline V2 will halt after the current case. Results written so far are preserved.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V2] Get Prescribe Pipeline Status (V1 Route Alias)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/v2/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cases",
+                "prescribe-pipeline",
+                "v2",
+                "status"
+              ]
+            },
+            "description": "Poll the V2 batch pipeline progress using the /api/v1 URL namespace."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/cases/prescribe-pipeline/v2/status",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "cases",
+                    "prescribe-pipeline",
+                    "v2",
+                    "status"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"running\",\n  \"run_id\": \"8348dc1cbcc9\",\n  \"version\": \"v2\",\n  \"total_cases\": 95,\n  \"processed_cases\": 15,\n  \"passed_cases\": 15,\n  \"failed_cases\": 0,\n  \"current_case_no\": 332,\n  \"result_file\": \"/app/tmp/prescribe_pipeline_v2_20261026_120000.json\",\n  \"elapsed_seconds\": 210.5,\n  \"error\": null\n}"
             }
           ]
         }
@@ -1024,6 +1689,75 @@
               "code": 200,
               "_postman_previewlanguage": "json",
               "body": "{\n  \"query\": \"anxiety and insomnia bridge therapy\",\n  \"total_matches\": 1,\n  \"matches\": [\n    {\n      \"brand_name\": \"ZOLAVIL\",\n      \"canonical_molecule\": \"Etizolam\",\n      \"is_fdc\": false,\n      \"constituent_strengths_mg\": {\n        \"Etizolam\": 0.5\n      },\n      \"modal_strength_mg\": 0.5,\n      \"release_form\": \"Regular\",\n      \"dosage_tier\": \"STANDARD_MAINTENANCE\",\n      \"dosage_group_id\": \"GRP_ETIZOLAM_STANDARD\",\n      \"clinical_dosing_indication\": \"Short-term bridge therapy for generalized anxiety and associated insomnia.\",\n      \"digest_text\": \"Etizolam, marketed as ZOLAVIL, is used as short-term bridge therapy for generalized anxiety and associated insomnia.\",\n      \"similarity_score\": 0.8412\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Generate Medication Search Queries (LLM Vector & BM25)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"symptoms\": [\n    \"anxiety\",\n    \"restlessness\",\n    \"insomnia\"\n  ],\n  \"diagnosis\": [\n    \"MDD WITH ANXIOUS DISTRESS\"\n  ],\n  \"durationContext\": \"1.5 years\",\n  \"currentRegimen\": [\n    \"Venlafaxine 75mg\"\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/medicines/generate-queries",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "medicines",
+                "generate-queries"
+              ]
+            },
+            "description": "Execute active clinical prompt with Gemini LLM to synthesize vector semantic search queries and BM25 keywords for medicine matching."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"symptoms\": [\"anxiety\", \"restlessness\", \"insomnia\"], \"diagnosis\": [\"MDD WITH ANXIOUS DISTRESS\"]}"
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/v1/medicines/generate-queries",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "medicines",
+                    "generate-queries"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"vector_semantic_queries\": [\n    \"First-line therapeutic maintenance anchor for major depressive episodes and generalized anxiety disorder\",\n    \"Intermediate- to long-acting benzodiazepine standard nocturnal dose for panic disorder and generalized anxiety bridging\"\n  ],\n  \"bm25_keywords\": [\n    \"Escitalopram\",\n    \"Clonazepam\",\n    \"Venlafaxine\",\n    \"SSRI\",\n    \"SNRI\",\n    \"Benzodiazepine\"\n  ]\n}"
             }
           ]
         }

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import contextvars
+from datetime import datetime, timezone
 import json
 import logging
+from pathlib import Path
 import re
+import sys
 import time
 from typing import Any
+import uuid
 
 from google import genai
 from google.genai import types
@@ -15,8 +20,168 @@ from meldai.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
+_current_run_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_run_id_ctx", default=None)
+_current_call_name_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_call_name_ctx", default=None)
 
-from pathlib import Path
+
+def set_llm_run_context(run_id: str | None, call_name: str | None = None) -> None:
+    """Set the active run_id and call_name in contextvars for downstream LLM calls."""
+    _current_run_id_ctx.set(run_id)
+    _current_call_name_ctx.set(call_name)
+
+
+def get_llm_run_context() -> tuple[str | None, str | None]:
+    """Get active (run_id, call_name) from contextvars."""
+    return _current_run_id_ctx.get(), _current_call_name_ctx.get()
+
+
+def extract_base_run_id(run_id: str) -> str:
+    """Normalize run_id to group all calls of a run into the same log file."""
+    cleaned = re.sub(
+        r"_(?:step\d+(?:_response|_prompt)?|response|prompt|triage|clinical_summary|symptom_notes)$",
+        "",
+        run_id,
+    )
+    return cleaned if cleaned else run_id
+
+
+def get_run_log_file_paths(run_id: str) -> tuple[Path, Path]:
+    """Get the log file paths in logs/ and tmp/ for a given run_id."""
+    base_id = extract_base_run_id(run_id)
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    logs_dir = repo_root / "logs"
+    tmp_dir = repo_root / "tmp"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    logs_file = logs_dir / f"{base_id}.log"
+    tmp_file = tmp_dir / f"{base_id}_llm_calls.log"
+    return logs_file, tmp_file
+
+
+def log_llm_call(
+    *,
+    run_id: str,
+    call_name: str,
+    model_name: str,
+    temperature: float | None,
+    prompt: str,
+    response_text: str | None = None,
+    elapsed_seconds: float = 0.0,
+    metrics: dict[str, Any] | None = None,
+    error: Exception | str | None = None,
+) -> tuple[str, str]:
+    """Log LLM call (request + response/error) into console and per-run log files."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    base_id = extract_base_run_id(run_id)
+    logs_file, tmp_file = get_run_log_file_paths(run_id)
+
+    toks = (metrics or {}).get("tokens_used", {})
+    try:
+        p_toks = int(toks.get("prompt_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        p_toks = 0
+    try:
+        c_toks = int(toks.get("candidates_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        c_toks = 0
+    try:
+        t_toks = int(toks.get("total_tokens", 0) or (p_toks + c_toks))
+    except (TypeError, ValueError):
+        t_toks = p_toks + c_toks
+
+    try:
+        cost = float((metrics or {}).get("cost_usd", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        cost = 0.0
+
+    # 1. Console Logging (Both logger.info and print(..., flush=True) for Docker container log streaming)
+    console_req = (
+        f"\n{'='*80}\n"
+        f"🤖 [LLM REQUEST] [{ts}]\n"
+        f"   Run ID      : {run_id} (Base: {base_id})\n"
+        f"   Call Name   : {call_name}\n"
+        f"   Model       : {model_name}\n"
+        f"   Temperature : {temperature}\n"
+        f"{'-'*80}\n"
+        f"{prompt.strip()}\n"
+        f"{'='*80}\n"
+    )
+    logger.info(console_req)
+    print(console_req, flush=True)
+
+    if error is not None:
+        console_res = (
+            f"\n{'='*80}\n"
+            f"❌ [LLM ERROR] [{ts}]\n"
+            f"   Run ID      : {run_id}\n"
+            f"   Call Name   : {call_name}\n"
+            f"   Latency     : {elapsed_seconds}s\n"
+            f"   Error       : {error}\n"
+            f"{'='*80}\n"
+        )
+        logger.error(console_res)
+        print(console_res, flush=True)
+    else:
+        res_snippet = (response_text or "").strip()
+        console_res = (
+            f"\n{'='*80}\n"
+            f"✅ [LLM RESPONSE] [{ts}]\n"
+            f"   Run ID      : {run_id}\n"
+            f"   Call Name   : {call_name}\n"
+            f"   Latency     : {elapsed_seconds}s\n"
+            f"   Tokens      : {t_toks} (prompt: {p_toks}, candidates: {c_toks})\n"
+            f"   Cost        : ${cost:.6f}\n"
+            f"{'-'*80}\n"
+            f"{res_snippet}\n"
+            f"{'='*80}\n"
+        )
+        logger.info(console_res)
+        print(console_res, flush=True)
+
+    # 2. Per-Run Log File
+    file_entry_lines = [
+        "=" * 80,
+        f"[LLM CALL] [{ts}]",
+        f"Run ID      : {run_id} (Base: {base_id})",
+        f"Call Name   : {call_name}",
+        f"Model       : {model_name}",
+        f"Temperature : {temperature}",
+        "-" * 80,
+        ">>> REQUEST PROMPT:",
+        prompt.strip(),
+        "-" * 80,
+    ]
+    if error is not None:
+        file_entry_lines.extend([
+            f"<<< ERROR (Latency: {elapsed_seconds}s):",
+            str(error).strip(),
+        ])
+    else:
+        file_entry_lines.extend([
+            f"<<< RESPONSE (Latency: {elapsed_seconds}s | Tokens: {t_toks} | Cost: ${cost:.6f}):",
+            (response_text or "").strip(),
+        ])
+    file_entry_lines.extend(["=" * 80, "\n"])
+    file_entry_text = "\n".join(file_entry_lines)
+
+    for target_path in (logs_file, tmp_file):
+        try:
+            if not target_path.exists() or target_path.stat().st_size == 0:
+                header = (
+                    f"{'='*80}\n"
+                    f"MELDAI ENGINE — LLM CALLS AUDIT LOG (RUN ID: {base_id})\n"
+                    f"Created at: {ts}\n"
+                    f"{'='*80}\n\n"
+                )
+                target_path.write_text(header + file_entry_text, encoding="utf-8")
+            else:
+                with open(target_path, "a", encoding="utf-8") as f:
+                    f.write(file_entry_text)
+        except Exception as exc:
+            logger.warning("Failed writing LLM call to %s: %s", target_path, exc)
+
+    return str(logs_file), str(tmp_file)
+
 
 MEDICATION_SEARCH_PROMPT_PATH = (
     Path(__file__).resolve().parent / "prompts" / "medication_search" / "active_prompt.md"
@@ -54,8 +219,33 @@ class GeminiService:
             self._client = genai.Client(api_key=self._api_key)
         return self._client
 
+    def _infer_call_name(self, prompt: str) -> str:
+        """Infer descriptive call_name if not explicitly provided."""
+        p_lower = prompt.lower()
+        if "step 2: fill clinical gaps" in p_lower:
+            return "step2_fill_gap_prescription"
+        elif "senior consultant indian psychiatrist" in p_lower:
+            return "step1_psychiatrist_prescription"
+        elif "evaluating changes in patient symptoms and intake items" in p_lower or "clinical context" in p_lower:
+            return "triage_symptom_changes"
+        elif "deprescrib" in p_lower:
+            return "deprescribing_review"
+        elif "active medication search" in p_lower or "patient clinical presentation" in p_lower:
+            return "medication_search_queries"
+        return "llm_generation"
+
     def _calculate_cost(self, prompt_tokens: int, candidates_tokens: int) -> float:
         """Calculate estimated cost in USD based on model pricing."""
+        m = (self._model_name or "").lower()
+        try:
+            pt = int(prompt_tokens)
+        except (TypeError, ValueError):
+            pt = 0
+        try:
+            ct = int(candidates_tokens)
+        except (TypeError, ValueError):
+            ct = 0
+
         m = (self._model_name or "").lower()
         if "pro" in m:
             input_rate = 1.25 / 1_000_000.0
@@ -64,16 +254,29 @@ class GeminiService:
             input_rate = 0.075 / 1_000_000.0
             output_rate = 0.30 / 1_000_000.0
 
-        cost = (prompt_tokens * input_rate) + (candidates_tokens * output_rate)
+        cost = (pt * input_rate) + (ct * output_rate)
         return round(cost, 6)
 
     def generate_content_with_metadata(
         self,
         prompt: str,
         temperature: float | None = None,
+        run_id: str | None = None,
+        call_name: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """Call Google Gemini API using google-genai SDK and return (generated_text, metrics)."""
+        """Call Google Gemini API using google-genai SDK and return (generated_text, metrics).
+
+        Logs all requests and responses into the console and per-run log file.
+        """
         start_time = time.perf_counter()
+        ctx_run_id, ctx_call_name = get_llm_run_context()
+        active_run_id = (
+            run_id
+            or ctx_run_id
+            or f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        )
+        active_call_name = call_name or ctx_call_name or self._infer_call_name(prompt)
+        effective_temp = temperature if temperature is not None else self._temperature
 
         if not self.is_configured:
             logger.warning("Gemini API key is not configured. Generating offline mock response.")
@@ -92,10 +295,20 @@ class GeminiService:
                 },
                 "cost_usd": cost,
             }
+            log_llm_call(
+                run_id=active_run_id,
+                call_name=active_call_name,
+                model_name=self._model_name,
+                temperature=effective_temp,
+                prompt=prompt,
+                response_text=raw_text,
+                elapsed_seconds=elapsed,
+                metrics=metrics,
+            )
             return raw_text, metrics
 
         config = types.GenerateContentConfig(
-            temperature=temperature if temperature is not None else self._temperature,
+            temperature=effective_temp,
             response_mime_type="application/json",
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
@@ -110,9 +323,25 @@ class GeminiService:
             raw_text = response.text or ""
 
             usage = getattr(response, "usage_metadata", None)
-            p_toks = (getattr(usage, "prompt_token_count", 0) or 0) if usage else 0
-            c_toks = (getattr(usage, "candidates_token_count", 0) or 0) if usage else 0
-            t_toks = (getattr(usage, "total_token_count", 0) or 0) if usage else (p_toks + c_toks)
+            p_raw = getattr(usage, "prompt_token_count", 0) if usage else 0
+            c_raw = getattr(usage, "candidates_token_count", 0) if usage else 0
+            t_raw = getattr(usage, "total_token_count", 0) if usage else 0
+
+            try:
+                p_toks = int(p_raw) if p_raw is not None else 0
+            except (TypeError, ValueError):
+                p_toks = 0
+
+            try:
+                c_toks = int(c_raw) if c_raw is not None else 0
+            except (TypeError, ValueError):
+                c_toks = 0
+
+            try:
+                t_toks = int(t_raw) if t_raw is not None else (p_toks + c_toks)
+            except (TypeError, ValueError):
+                t_toks = p_toks + c_toks
+
             if t_toks == 0 and (p_toks + c_toks) > 0:
                 t_toks = p_toks + c_toks
 
@@ -127,8 +356,28 @@ class GeminiService:
                 },
                 "cost_usd": cost,
             }
+            log_llm_call(
+                run_id=active_run_id,
+                call_name=active_call_name,
+                model_name=self._model_name,
+                temperature=effective_temp,
+                prompt=prompt,
+                response_text=raw_text,
+                elapsed_seconds=elapsed,
+                metrics=metrics,
+            )
             return raw_text, metrics
         except Exception as exc:
+            elapsed = round(time.perf_counter() - start_time, 4)
+            log_llm_call(
+                run_id=active_run_id,
+                call_name=active_call_name,
+                model_name=self._model_name,
+                temperature=effective_temp,
+                prompt=prompt,
+                elapsed_seconds=elapsed,
+                error=exc,
+            )
             logger.error("Gemini API request error via google-genai: %s", exc)
             raise
 
@@ -136,9 +385,16 @@ class GeminiService:
         self,
         prompt: str,
         temperature: float | None = None,
+        run_id: str | None = None,
+        call_name: str | None = None,
     ) -> str:
         """Call Google Gemini API using google-genai SDK and return the generated text."""
-        raw_text, _ = self.generate_content_with_metadata(prompt=prompt, temperature=temperature)
+        raw_text, _ = self.generate_content_with_metadata(
+            prompt=prompt,
+            temperature=temperature,
+            run_id=run_id,
+            call_name=call_name,
+        )
         return raw_text
 
     def generate_prescription(
@@ -146,10 +402,16 @@ class GeminiService:
         prompt: str,
         temperature: float | None = None,
         run_id: str | None = None,
+        call_name: str | None = None,
     ) -> dict[str, Any]:
         """Generate structured prescription recommendations with latency, token usage, and cost."""
         try:
-            raw_text, metrics = self.generate_content_with_metadata(prompt=prompt, temperature=temperature)
+            raw_text, metrics = self.generate_content_with_metadata(
+                prompt=prompt,
+                temperature=temperature,
+                run_id=run_id,
+                call_name=call_name or "generate_prescription",
+            )
         except Exception as exc:
             if run_id:
                 try:
@@ -198,7 +460,15 @@ class GeminiService:
         )
 
         full_prompt = system_text + patient_presentation
-        raw_text = self.generate_content(prompt=full_prompt, temperature=temperature)
+        raw_text = self.generate_content(
+            prompt=full_prompt,
+            temperature=temperature,
+            call_name="medication_search_queries",
+        )
+
+        logger.info("Gemini raw_text: %s", raw_text)
+
+        return self._parse_search_queries_response(raw_text, symptoms=symptoms, diagnosis=diagnosis)
 
         logger.info("Gemini raw_text: %s", raw_text)
 
@@ -371,6 +641,121 @@ class GeminiService:
             return json.dumps({
                 "vector_semantic_queries": vec_queries,
                 "bm25_keywords": list(dict.fromkeys(keywords)),
+            })
+
+        # Step 1 llmMedCheck prompt mock
+        if "llm_med_check" in prompt.lower() or "check medication" in prompt.lower() or "directly or indirectly target" in prompt.lower():
+            return json.dumps({
+                "entity_medication_check": [
+                    {
+                        "entity": "severe anxiety",
+                        "entity_type": "symptom",
+                        "curie": "HP:0000739",
+                        "delta_status": "new",
+                        "directly_targeted": True,
+                        "indirectly_targeted": False,
+                        "attributed_molecules": ["Escitalopram + Clonazepam", "Escitalopram"],
+                        "recommended_top_molecules": [
+                            {
+                                "canonical_molecule": "Escitalopram + Clonazepam",
+                                "is_fdc": True,
+                                "doctor_brands": ["RTC-LS"],
+                                "frequency": 10,
+                                "score": 9.5,
+                                "percentage": 90.0,
+                                "targeting_type": "direct",
+                                "rationale": "First-line FDC anxiolytic coverage.",
+                            }
+                        ],
+                    },
+                    {
+                        "entity": "headache",
+                        "entity_type": "symptom",
+                        "curie": "HP:0002315",
+                        "delta_status": "new",
+                        "directly_targeted": True,
+                        "indirectly_targeted": False,
+                        "attributed_molecules": ["Paracetamol"],
+                        "recommended_top_molecules": [
+                            {
+                                "canonical_molecule": "Paracetamol",
+                                "is_fdc": False,
+                                "doctor_brands": ["DOLO 650"],
+                                "frequency": 5,
+                                "score": 8.0,
+                                "percentage": 80.0,
+                                "targeting_type": "direct",
+                                "rationale": "Analgesic for tension headache.",
+                            }
+                        ],
+                    },
+                ],
+                "summary": "Verified direct and indirect coverage across all clinical entities.",
+            })
+
+        # Step 2 V2 llmMedPrescribe prompt mock
+        if "llm_med_prescribe" in prompt.lower() or "<updated-entity-matrix>" in prompt or "reproducing their own prescribing pattern" in prompt.lower():
+            return json.dumps({
+                "medications": [
+                    {
+                        "brand_name": "RTC-LS",
+                        "canonical_molecule": "Escitalopram + Clonazepam",
+                        "is_fdc": True,
+                        "constituent_strengths_mg": {
+                            "Escitalopram": 10.0,
+                            "Clonazepam": 0.5,
+                        },
+                        "modal_strength_mg": 10.0,
+                        "release_form": "FDC",
+                        "dosage_tier": "STANDARD_MAINTENANCE",
+                        "dosage_group_id": "GRP_FDC_ESCITALOPRAM_10_CLONAZEPAM_0.5",
+                        "clinical_dosing_indication": "Fixed-dose combination for severe generalized anxiety with panic symptoms and sleep disruption.",
+                        "target_entities": ["severe anxiety", "insomnia"],
+                        "clinical_rationale": "FDC predicted for immediate anxiolytic coverage while antidepressant takes effect.",
+                    },
+                    {
+                        "brand_name": "ESPRIDE",
+                        "canonical_molecule": "Escitalopram",
+                        "is_fdc": False,
+                        "constituent_strengths_mg": {
+                            "Escitalopram": 10.0,
+                        },
+                        "modal_strength_mg": 10.0,
+                        "release_form": "Regular",
+                        "dosage_tier": "STANDARD_MAINTENANCE",
+                        "dosage_group_id": "GRP_ESCITALOPRAM_STANDARD",
+                        "clinical_dosing_indication": "Core SSRI antidepressant therapy for unipolar depression and generalized anxiety disorder.",
+                        "target_entities": ["generalized anxiety disorder"],
+                        "clinical_rationale": "Non-FDC SSRI monotherapy indicated for maintenance.",
+                    },
+                    {
+                        "brand_name": "DOLO 650",
+                        "canonical_molecule": "Paracetamol",
+                        "is_fdc": False,
+                        "constituent_strengths_mg": {
+                            "Paracetamol": 650.0,
+                        },
+                        "modal_strength_mg": 650.0,
+                        "release_form": "Regular",
+                        "dosage_tier": "STANDARD_MAINTENANCE",
+                        "dosage_group_id": "GRP_PARACETAMOL_650",
+                        "clinical_dosing_indication": "Analgesic for episodic tension headache and somatic complaints.",
+                        "target_entities": ["headache", "somatic pain"],
+                        "clinical_rationale": "Analgesic for tension-type somatic headache relief.",
+                    },
+                ],
+                "deprescribing_recommendations": [
+                    {
+                        "medicine": "Clonazepam",
+                        "target_symptom": "insomnia",
+                        "status_change": "stop",
+                        "action": "taper",
+                        "rationale": "Taper acute benzodiazepine once sleep restores.",
+                        "taper_plan": "0.25 mg for 3 days then discontinue.",
+                    }
+                ],
+                "explanation": "Final comprehensive Indian Psychiatrist regimen integrating updated entity matrix.",
+                "confidence_score": 0.95,
             })
 
         # Default mock for generate_prescription

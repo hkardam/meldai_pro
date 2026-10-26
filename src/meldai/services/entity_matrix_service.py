@@ -487,6 +487,13 @@ def rank_meds(
             if cand_gender is None and isinstance(cand.get("patient"), dict):
                 cand_gender = cand["patient"].get("gender")
 
+        # Filter out candidates with incompatible age similarity (age_sim <= 0.0 across 3+ age bands)
+        cand_age_sim = None
+        if request.patient_age is not None and cand_age is not None:
+            cand_age_sim = patient_similarity(request.patient_age, cand_age)
+            if cand_age_sim is not None and cand_age_sim <= 0.0:
+                continue
+
         p_sim = patient_info_similarity(
             age_q=request.patient_age,
             age_c=cand_age,
@@ -507,6 +514,7 @@ def rank_meds(
             "lca_score": best_lca,
             "vec_score": best_vec,
             "patient_info_score": p_sim,
+            "age_similarity": cand_age_sim,
         })
 
     # Sort descending by combined case score, secondary tie-break by clinical similarity
@@ -528,11 +536,13 @@ def rank_meds(
     # 5. Aggregate molecules across top cases
     mol_counts: Dict[str, int] = defaultdict(int)
     mol_scores: Dict[str, List[float]] = defaultdict(list)
+    mol_age_sims: Dict[str, List[float]] = defaultdict(list)
     mol_brands: Dict[str, set[str]] = defaultdict(set)
     mol_is_fdc: Dict[str, bool] = {}
 
     for item in top_cases:
         case_score = item["score"]
+        c_age_sim = item.get("age_similarity")
         meds = _extract_meds_from_case(item["case_doc"])
         seen_in_case: set[str] = set()
 
@@ -547,6 +557,8 @@ def rank_meds(
 
             mol_counts[canon] += 1
             mol_scores[canon].append(case_score)
+            if c_age_sim is not None:
+                mol_age_sims[canon].append(c_age_sim)
             brand = med.get("brand_name") or med.get("name")
             if brand and brand.strip() and brand.strip() != canon:
                 mol_brands[canon].add(brand.strip())
@@ -556,6 +568,12 @@ def rank_meds(
     ranked_molecules: List[RankedMoleculeItem] = []
 
     for canon, count in mol_counts.items():
+        # Filter out meds whose average age similarity is incompatible
+        if request.patient_age is not None and canon in mol_age_sims and mol_age_sims[canon]:
+            avg_mol_age_sim = float(np.mean(mol_age_sims[canon]))
+            if avg_mol_age_sim <= 0.0:
+                continue
+
         total_score = round(float(np.sum(mol_scores[canon])), 4)
         pct = round((count / num_top) * 100, 1) if num_top > 0 else 0.0
         avg_sim = round(float(np.mean(mol_scores[canon])), 4) if mol_scores[canon] else 0.0
@@ -707,6 +725,13 @@ def rank_meds_for_entity(
             if cand_gender is None and isinstance(cand.get("patient"), dict):
                 cand_gender = cand["patient"].get("gender")
 
+        # Filter out candidates with incompatible age similarity (age_sim <= 0.0 across 3+ age bands)
+        cand_age_sim = None
+        if patient_age is not None and cand_age is not None:
+            cand_age_sim = patient_similarity(patient_age, cand_age)
+            if cand_age_sim is not None and cand_age_sim <= 0.0:
+                continue
+
         p_sim = patient_info_similarity(
             age_q=patient_age,
             age_c=cand_age,
@@ -723,6 +748,7 @@ def rank_meds_for_entity(
             "case_doc": cand,
             "score": case_score,
             "clinical_similarity": clinical_sim,
+            "age_similarity": cand_age_sim,
         })
 
     scored_cases.sort(key=lambda x: (x["score"], x["clinical_similarity"]), reverse=True)
@@ -731,11 +757,13 @@ def rank_meds_for_entity(
     # Aggregate molecules from top cases
     mol_counts = defaultdict(int)
     mol_scores_map = defaultdict(list)
+    mol_age_sims = defaultdict(list)
     mol_brands = defaultdict(set)
     mol_is_fdc = {}
 
     for item in top_cases:
         case_score = item["score"]
+        c_age_sim = item.get("age_similarity")
         meds = _extract_meds_from_case(item["case_doc"])
         seen_in_case = set()
 
@@ -750,6 +778,8 @@ def rank_meds_for_entity(
 
             mol_counts[canon] += 1
             mol_scores_map[canon].append(case_score)
+            if c_age_sim is not None:
+                mol_age_sims[canon].append(c_age_sim)
             brand = med.get("brand_name") or med.get("name")
             if brand and brand.strip() and brand.strip() != canon:
                 mol_brands[canon].add(brand.strip())
@@ -758,6 +788,12 @@ def rank_meds_for_entity(
     num_top = len(top_cases)
     top_molecules = []
     for canon, count in mol_counts.items():
+        # Filter out meds whose average age similarity is incompatible
+        if patient_age is not None and canon in mol_age_sims and mol_age_sims[canon]:
+            avg_mol_age_sim = float(np.mean(mol_age_sims[canon]))
+            if avg_mol_age_sim <= 0.0:
+                continue
+
         scores_list = mol_scores_map[canon]
         avg_sim = round(float(np.mean(scores_list)), 4) if scores_list else 0.0
         total_score = round(float(np.sum(scores_list)), 4)

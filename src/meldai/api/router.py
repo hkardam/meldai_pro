@@ -48,6 +48,8 @@ from meldai.services.assertion_service import ClinicalAssertionService
 from meldai.services.case_service import CaseService
 from meldai.services.chief_complaints_runner import get_patient_migration_runner
 from meldai.services.prescribe_pipeline_runner import get_prescribe_pipeline_runner
+from meldai.v2.services.prescribe_pipeline_runner import get_prescribe_pipeline_v2_runner
+from meldai.v2.router import v2_router
 from meldai.services.gemini_service import get_gemini_service
 from meldai.services.entity_matrix_service import rank_meds
 from meldai.services.medicine_master_service import MedicineMasterService
@@ -623,3 +625,62 @@ def get_prescribe_pipeline_status() -> PrescribePipelineStatusResponse:
     """Returns progress counters, current case, elapsed time, and path to the result file."""
     runner = get_prescribe_pipeline_runner()
     return PrescribePipelineStatusResponse(**runner.get_status())
+
+
+# ---------------------------------------------------------------------------
+# Prescribe Pipeline V2 (Multi-Step Reasoning across 95 cases)
+# ---------------------------------------------------------------------------
+
+@api_router.post(
+    "/cases/prescribe-pipeline/v2/start",
+    response_model=PrescribePipelineActionResponse,
+    summary="Start the V2 multi-step prescribe-medications batch pipeline in the background",
+)
+def start_prescribe_pipeline_v2() -> PrescribePipelineActionResponse:
+    """Kick off the background pipeline that runs PrescriptionServiceV2 for every
+    case in prescribe-request-all-cases.json and writes results to tmp/."""
+    runner = get_prescribe_pipeline_v2_runner()
+    res = runner.start()
+    if res.get("status") == "conflict":
+        raise HTTPException(status_code=409, detail=res["message"])
+    return PrescribePipelineActionResponse(
+        status=res["status"],
+        message=res["message"],
+        run_id=res.get("run_id"),
+        result_file=res.get("result_file"),
+    )
+
+
+@api_router.post(
+    "/cases/prescribe-pipeline/v2/stop",
+    response_model=PrescribePipelineActionResponse,
+    summary="Request graceful stop of the active V2 prescribe-medications pipeline",
+)
+def stop_prescribe_pipeline_v2() -> PrescribePipelineActionResponse:
+    """Signal the running V2 pipeline to stop after the current case finishes."""
+    runner = get_prescribe_pipeline_v2_runner()
+    res = runner.stop()
+    return PrescribePipelineActionResponse(
+        status=res["status"],
+        message=res["message"],
+    )
+
+
+@api_router.get(
+    "/cases/prescribe-pipeline/v2/status",
+    response_model=PrescribePipelineStatusResponse,
+    summary="Poll the current state and progress of the V2 prescribe-medications pipeline",
+)
+def get_prescribe_pipeline_v2_status() -> PrescribePipelineStatusResponse:
+    """Returns progress counters, current case, elapsed time, and path to the result file for V2."""
+    runner = get_prescribe_pipeline_v2_runner()
+    return PrescribePipelineStatusResponse(**runner.get_status())
+
+
+# ---------------------------------------------------------------------------
+# V2 Router Mount
+# ---------------------------------------------------------------------------
+
+api_v2_router = APIRouter(prefix="/api/v2")
+api_v2_router.include_router(v2_router)
+

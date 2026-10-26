@@ -12,7 +12,7 @@ from meldai.api.res_dtos import DecoratedCase, PrescribeMedicationsResponse, Sim
 from meldai.config import Settings, get_settings
 from meldai.db.mongodb import MongoKnowledgeBase
 from meldai.services.case_service import CaseService
-from meldai.services.gemini_service import GeminiService, get_gemini_service
+from meldai.services.gemini_service import GeminiService, get_gemini_service, set_llm_run_context
 from meldai.utils import generate_run_id, save_prompt_to_tmp, save_response_to_tmp
 
 logger = logging.getLogger(__name__)
@@ -360,11 +360,16 @@ class PrescriptionService:
 
         # 3. Generate run ID and save executed prompt to tmp file
         run_id = generate_run_id(case_no=decorated_case.caseNo)
+        set_llm_run_context(run_id, call_name="prescription_v1_synthesis")
         save_prompt_to_tmp(prompt, run_id=run_id)
 
         # 4. Call Gemini LLM and dump raw response to tmp file
         try:
-            llm_result = self._gemini_service.generate_prescription(prompt, run_id=run_id)
+            llm_result = self._gemini_service.generate_prescription(
+                prompt,
+                run_id=run_id,
+                call_name="prescription_v1_synthesis",
+            )
             save_response_to_tmp(llm_result.get("raw_response", ""), run_id=run_id)
         except Exception as exc:
             save_response_to_tmp(f"ERROR: {exc}", run_id=run_id)

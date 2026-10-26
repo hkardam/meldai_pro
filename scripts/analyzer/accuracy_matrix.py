@@ -103,6 +103,14 @@ def resolve_input_path(filepath: Optional[str] = None) -> str:
         if cand_tmp.is_file():
             return str(cand_tmp)
 
+    # Check tmp/ for latest prescribe_pipeline results (v2 or v1)
+    tmp_dir = project_root / "tmp"
+    if not filepath and tmp_dir.is_dir():
+        found_files = list(tmp_dir.glob("prescribe_pipeline_*.json"))
+        if found_files:
+            found_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return str(found_files[0])
+
     for def_cand in DEFAULT_FILE_CANDIDATES:
         cand_root = project_root / def_cand
         if cand_root.is_file():

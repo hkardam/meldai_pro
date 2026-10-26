@@ -199,3 +199,22 @@ def parse_clinical_date(date_val: Any) -> Optional[datetime]:
         return None
 
 
+def clean_diagnosis_term(term: str | None) -> str:
+    """Clean a diagnosis string by removing any special characters before a letter starts
+
+    and after a letter ends, then trimming whitespace.
+    Applied strictly to diagnosis entities only.
+
+    Example:
+        "? mdd with anxious distress" -> "mdd with anxious distress"
+        "- ? mdd with anxious distress . " -> "mdd with anxious distress"
+    """
+    if not term or not isinstance(term, str):
+        return ""
+    import re
+    # Match from the first letter (a-zA-Z) to the last letter (a-zA-Z)
+    m = re.search(r"[a-zA-Z].*[a-zA-Z]|[a-zA-Z]", term)
+    if m:
+        return m.group(0).strip()
+    return ""
+

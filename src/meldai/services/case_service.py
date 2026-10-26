@@ -119,7 +119,7 @@ class CaseService:
     ) -> DecoratedCase:
         """Decorate a clinical case by resolving symptoms to HPO, diagnoses to MONDO,
         and generating per-term dense SapBERT embeddings."""
-        from meldai.utils import to_curie
+        from meldai.utils import clean_diagnosis_term, to_curie
 
         # 1. Process symptoms
         decorated_symptoms: List[DecoratedSymptomItem] = []
@@ -184,7 +184,8 @@ class CaseService:
         # 2. Process diagnoses
         decorated_diagnoses: List[DecoratedDiagnosisItem] = []
         if diagnosis:
-            clean_diagnoses = [d.strip() for d in diagnosis if d and d.strip()]
+            cleaned = [clean_diagnosis_term(d) for d in diagnosis if d]
+            clean_diagnoses = [d for d in cleaned if d]
             if clean_diagnoses:
                 mondo = self._get_mondo()
                 embedder = self._get_embedder()

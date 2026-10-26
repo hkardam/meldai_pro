@@ -16,7 +16,7 @@ from meldai.db.postgres import PostgresSource
 from meldai.db.mongodb import MongoKnowledgeBase
 from meldai.nlp.sapbert import SapBERTEmbedder
 from meldai.pipelines.medical_analysis import MedicalAnalysisPipeline
-from meldai.api.router import api_router
+from meldai.api.router import api_router, api_v2_router
 
 import sys
 
@@ -52,6 +52,7 @@ def create_web_app() -> FastAPI:
         version="0.2.0",
     )
     web_app.include_router(api_router)
+    web_app.include_router(api_v2_router)
     return web_app
 
 

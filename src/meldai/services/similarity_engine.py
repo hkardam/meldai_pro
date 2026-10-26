@@ -261,7 +261,7 @@ def patient_similarity(age_q: Optional[float], age_c: Optional[float], sigma: fl
     elif diff == 2:
         band_score = 0.1
     else:
-        band_score = 0.0
+        return 0.0
 
     # Gaussian log-age similarity: S = exp(-(ln(1+a1) - ln(1+a2))^2 / (2 * sigma^2))
     x_q = math.log(1.0 + a_q)
@@ -313,6 +313,8 @@ def patient_info_similarity(
     gen_sim = gender_similarity(gender_q, gender_c)
 
     if age_sim is not None and gen_sim is not None:
+        if age_sim <= 0.0:
+            return 0.0
         return 0.5 * age_sim + 0.5 * gen_sim
     if age_sim is not None:
         return age_sim

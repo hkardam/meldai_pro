@@ -112,6 +112,16 @@ class PrescribeMedicationsV2Request(BaseModel):
         default_factory=SimilarityParams,
         description="Similarity scoring weights for candidate retrieval",
     )
+    top_k: Optional[int] = Field(
+        default=None, ge=1, le=20,
+        description="Alias for top_k_per_entity",
+    )
+
+    @model_validator(mode="after")
+    def merge_top_k_alias(self):
+        if self.top_k is not None:
+            self.top_k_per_entity = self.top_k
+        return self
 
 
 class SimilarityWeightsInput(BaseModel):
