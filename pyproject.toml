@@ -44,7 +44,7 @@ dev = [
 ]
 
 [project.scripts]
-meldai = "meldai.main:cli_entrypoint"
+meldai = "main:cli_entrypoint"
 
 [tool.setuptools.packages.find]
 where = ["src"]

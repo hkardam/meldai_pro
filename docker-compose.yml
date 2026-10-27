@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    command: [ "python", "-m", "meldai.main", "serve", "--host", "0.0.0.0", "--port", "8000" ]
+    command: [ "python", "-m", "main", "serve", "--host", "0.0.0.0", "--port", "8000" ]
     network_mode: "host"
     volumes:
       # Mount the workspace directly for instant live editing & debugging

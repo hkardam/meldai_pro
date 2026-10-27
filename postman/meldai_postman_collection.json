@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "7f8c12a4-569d-4e9b-b8f2-39c8194ad901",
     "name": "MeldAI Clinical Intelligence Platform API",
-    "description": "REST API for medical data analysis, SapBERT embeddings, HPO and MONDO terminology",
+    "description": "REST API with Core services, MeldAI V1 prescription, and MeldAI V2 multi-step reasoning",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "version": "0.2.0"
   },

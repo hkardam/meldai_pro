@@ -70,5 +70,5 @@ RUN pip install --no-cache-dir --no-deps -e .
 EXPOSE 5678 8000
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python", "-m", "meldai.main", "serve", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "main", "serve", "--host", "0.0.0.0", "--port", "8000"]
 
