@@ -210,135 +210,27 @@ class PrescribePipelineStatusResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# V2 Prescribe Medications — Multi-Step Reasoning
+# V2 Prescribe Medications — Multi-Step Reasoning (Canonical: meldai_v2.res_dtos)
 # ---------------------------------------------------------------------------
-
-class EntityMoleculeRow(BaseModel):
-    """Top candidate molecules/FDCs the doctor historically used for a single symptom or diagnosis entity."""
-
-    entity: str = Field(..., description="Symptom or diagnosis term")
-    entity_type: str = Field(..., description="'symptom' or 'diagnosis'")
-    curie: Optional[str] = Field(default=None, description="HPO or MONDO CURIE for the entity")
-    delta_status: Optional[str] = Field(
-        default=None,
-        description="Clinical change classification: 'new' | 'maintained' | 'decreased' | 'increased' | 'stop'",
-    )
-    top_molecules: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        description="Ranked molecules/FDCs with doctor frequency, similarity score, and brand examples",
-    )
-    attributed_molecules: List[str] = Field(
-        default_factory=list,
-        description="Molecules/FDCs attributed by the LLM as targeting this entity",
-    )
+from meldai_v2.res_dtos import (  # noqa: E402
+    CandidateMolecule,
+    ClinicalDeltaSummary,
+    DeprescribeResponse,
+    DeprescribingRecommendation,
+    EntityMoleculeRow,
+    LLMStepCall,
+    MedCheckResponse,
+    PrescribeMedicationsV2Response,
+    PrescriptionMemoryState,
+    RankMoleculesResponse,
+    RankedMoleculeItem,
+)
 
 
-class DeprescribingRecommendation(BaseModel):
-    """Recommendation for a medication when evaluating clinical entity delta."""
-
-    medicine: str = Field(..., description="Medication name or molecule")
-    target_symptom: str = Field(..., description="Symptom or diagnosis entity it targets")
-    status_change: str = Field(
-        ...,
-        description="'stop' | 'maintained' | 'decreased' | 'increased' | 'new' (or 'resolved')",
-    )
-    action: str = Field(
-        ...,
-        description="'stop' | 'maintained' | 'decreased' | 'increased' | 'new'",
-    )
-    rationale: str = Field(..., description="Clinical reasoning for the recommended action")
-    taper_plan: Optional[str] = Field(
-        default=None,
-        description="Step-down schedule, dose adjustment instruction, or null",
-    )
 
 
-class ClinicalDeltaSummary(BaseModel):
-    """Clinical change delta between prior visits and current encounter."""
-
-    new_symptoms: List[str] = Field(default_factory=list, description="Newly presenting symptoms")
-    maintained_symptoms: List[str] = Field(default_factory=list, description="Persistent symptoms with stable severity")
-    decreased_symptoms: List[str] = Field(default_factory=list, description="Improving/milder symptoms")
-    increased_symptoms: List[str] = Field(default_factory=list, description="Worsening/more severe symptoms")
-    stop_symptoms: List[str] = Field(default_factory=list, description="Resolved symptoms absent in current visit")
-    new_diagnoses: List[str] = Field(default_factory=list, description="Newly identified diagnoses")
-    maintained_diagnoses: List[str] = Field(default_factory=list, description="Continued diagnoses")
-    stop_diagnoses: List[str] = Field(default_factory=list, description="Resolved diagnoses")
-    prior_medications: List[str] = Field(default_factory=list, description="Distinct medications from prior visits")
-    clinical_notes: str = Field(default="", description="Clinical synthesis note detailing change trajectory")
 
 
-class LLMStepCall(BaseModel):
-    """Container for prompt and output of a workflow LLM step."""
-
-    prompt: Optional[str] = Field(default=None, description="Complete prompt sent to the LLM")
-    output: Any = Field(default=None, description="Structured parsed response or output received from the LLM")
 
 
-class PrescribeMedicationsV2Response(BaseModel):
-    """Full v2 clinical summary and encounter progression response."""
 
-    clinical_summary: str = Field(default="", description="Human-readable text of clinical summary for the case")
-    llmMedCheck: Optional[LLMStepCall] = Field(
-        default=None,
-        description="Step 1: Check medications targeting entities and select top molecules for empty entities",
-    )
-    llmMedPrescribe: Optional[LLMStepCall] = Field(
-        default=None,
-        description="Step 2: Prescribing synthesis based on active_prompt.md",
-    )
-    medications: List[Union[Dict[str, Any], str]] = Field(
-        default_factory=list,
-        description="Final recommended medication master objects or molecule/brand name strings",
-    )
-    entity_matrix: List[EntityMoleculeRow] = Field(
-        default_factory=list,
-        description="Per-entity top molecule breakdown updated after Step 1 LLM check",
-    )
-    history_delta: Optional[Union[ClinicalDeltaSummary, Dict[str, Any]]] = Field(
-        default=None,
-        description="Summary of what changed between past visits and the current encounter",
-    )
-    explanation: str = Field(default="", description="Clinical justification for the final regimen")
-    past_cases_count: int = Field(default=0, description="Number of prior patient visits used")
-    run_id: Optional[str] = Field(default=None, description="Run ID for prompt/response trace files in tmp/")
-    metrics: Dict[str, Any] = Field(default_factory=dict, description="LLM token usage, cost, and response time")
-    workflow_prompts_file: Optional[str] = Field(
-        default=None,
-        description="Absolute file path where all prompts used across the workflow were stored",
-    )
-    llm_log_file: Optional[str] = Field(
-        default=None,
-        description="Absolute file path where all LLM calls (req + res) for this run were logged",
-    )
-
-
-class RankedMoleculeItem(BaseModel):
-    """Ranked molecule or combination prescribed for similar cases."""
-
-    canonical_molecule: str = Field(..., description="Canonical molecule or FDC combination name")
-    is_fdc: bool = Field(default=False, description="True if fixed-dose combination")
-    score: float = Field(default=0.0, description="Cumulative similarity score across matching cases")
-    frequency: int = Field(..., description="Number of top similar cases where this was prescribed")
-    percentage: float = Field(..., description="Percentage of top similar cases prescribing this molecule")
-    avg_similarity: float = Field(..., description="Average composite similarity score of prescribing cases")
-    doctor_brands: List[str] = Field(default_factory=list, description="Brands the doctor used in those cases")
-
-
-class CandidateMolecule(BaseModel):
-    canonical_molecule: str
-    frequency: int
-    score: float = 0.0
-
-
-class RankMoleculesResponse(BaseModel):
-    """Top molecules ranked by prescription frequency across similar cases."""
-
-    type: str = Field(..., description="Normalized entity type ('chiefComplaint' or 'diagnosis')")
-    query: str = Field(..., description="Query symptom or diagnosis term")
-    k: int = Field(..., description="Top-k limit returned")
-    curie: Optional[str] = Field(default=None, description="Resolved HPO or MONDO CURIE (e.g. HP:0002360)")
-    matched_term: Optional[str] = Field(default=None, description="Matched ontology term label")
-    similar_cases_count: int = Field(..., description="Number of top similar cases analyzed")
-    weights_applied: Dict[str, float] = Field(default_factory=dict, description="Normalized weights applied across components")
-    molecules: List[RankedMoleculeItem] = Field(default_factory=list, description="Ranked top-k molecules by frequency")

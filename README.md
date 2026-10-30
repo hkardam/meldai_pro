@@ -101,14 +101,14 @@ make up
 ### 2. Verify Health Status
 Check that external PostgreSQL, internal MongoDB, and ontology paths are operational:
 ```bash
-docker compose run --rm app python -m meldai.main check-health
+docker compose run --rm app python -m main check-health
 ```
 
 ### 3. Run the Clinical Pipeline
 Extract training cases, generate clinical embeddings, map phenotypes/diseases, and sink into MongoDB:
 ```bash
 make run-pipeline
-# or: docker compose run --rm app python -m meldai.main run-demo
+# or: docker compose run --rm app python -m main run-demo
 ```
 
 ---
@@ -119,7 +119,7 @@ This project has first-class support for **debugging live Python code running in
 
 ### How to Debug in VS Code:
 1. Open the project in VS Code.
-2. Put a **breakpoint** (red dot) anywhere in your code (e.g. inside `src/meldai/pipelines/medical_analysis.py`).
+2. Put a **breakpoint** (red dot) anywhere in your code (e.g. inside `src/core/pipelines/medical_analysis.py`).
 3. Run the container in debug wait mode:
    ```bash
    make debug
@@ -136,7 +136,7 @@ This project has first-class support for **debugging live Python code running in
 
 ### 1. Test SapBERT Clinical Embeddings
 ```bash
-docker compose run --rm app python -m meldai.main embed "acute myocardial infarction"
+docker compose run --rm app python -m main embed "acute myocardial infarction"
 ```
 
 ### 2. Download Offline Ontologies (HPO & MONDO)
@@ -164,7 +164,7 @@ make test
 When you are ready to expose this as a web application:
 1. Start the API server:
    ```bash
-   docker compose run --rm -p 8000:8000 app python -m meldai.main serve --host 0.0.0.0 --port 8000
+   docker compose run --rm -p 8000:8000 app python -m main serve --host 0.0.0.0 --port 8000
    ```
 2. Interactive Swagger / OpenAPI documentation is immediately available at:
    - **http://localhost:8000/docs**

@@ -30,7 +30,7 @@ if [ "${DEBUG_MODE}" = "true" ]; then
         exec python ${DEBUG_ARGS} "$@"
     elif [ "$1" = "meldai" ]; then
         shift
-        exec python ${DEBUG_ARGS} -m meldai.main "$@"
+        exec python ${DEBUG_ARGS} -m main "$@"
     fi
 fi
 

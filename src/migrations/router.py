@@ -25,12 +25,11 @@ migration_router = APIRouter()
 
 
 def _dep(name: str, fallback: Any) -> Any:
-    """Dynamically resolve dependency from migrations.router, meldai.api.router, or core.router (enables mock patching)."""
+    """Dynamically resolve dependency from migrations.router (enables mock patching)."""
     import sys
-    for mod_name in ("migrations.router", "meldai.api.router", "core.router"):
-        mod = sys.modules.get(mod_name)
-        if mod and hasattr(mod, name):
-            return getattr(mod, name)
+    mod = sys.modules.get("migrations.router")
+    if mod and hasattr(mod, name):
+        return getattr(mod, name)
     return fallback
 
 

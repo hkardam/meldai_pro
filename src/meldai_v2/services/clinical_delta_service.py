@@ -341,14 +341,34 @@ class SymptomChangeResult:
 
 @dataclass
 class TriagedComplaintItem:
-    """A single intake complaint item triaged into symptom/noise/status category."""
+    """A single intake complaint item triaged into symptom/noise/status category with delta diff."""
     raw_text: str
-    category: str             # 'symptom' | 'negated_symptom' | 'global_status' | 'non_symptom'
+    category: str                             # 'symptom' | 'negated_symptom' | 'global_status' | 'non_symptom'
     canonical_entity: Optional[str] = None  # Canonical symptom term if applicable (e.g. 'paranoia')
     status: Optional[str] = "new"           # 'decreased' | 'increased' | 'maintained' | 'stop' | 'new' | None
     display_status: Optional[str] = "new"   # 'improved' | 'worsened' | 'maintained' | 'resolved' | 'new' | None
     change_description: str = ""
     notes: str = ""
+    heuristic_mark: Optional[str] = None     # Heuristic keyword mark ('improved', 'worsened', etc.)
+    heuristic_category: Optional[str] = None # Heuristic pre-category ('symptom', 'non_symptom', etc.)
+    changed: bool = False                    # True if LLM classification differed from heuristic
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dict representation for API serialization and delta reporting."""
+        return {
+            "complaint": self.raw_text,
+            "category": self.category,
+            "canonical_entity": self.canonical_entity,
+            "status": self.status,
+            "display_status": self.display_status,
+            "llm_status": self.display_status,
+            "llm_category": self.category,
+            "heuristic_mark": self.heuristic_mark,
+            "heuristic_category": self.heuristic_category,
+            "changed": self.changed,
+            "change_description": self.change_description,
+            "notes": self.notes,
+        }
 
 
 @dataclass
@@ -364,6 +384,88 @@ class ClinicalChangeAssessment:
     raw_llm_response: Optional[str] = None
     used_llm: bool = False
     llm_prompt: Optional[str] = None
+    triage_delta: Optional[List[Dict[str, Any]]] = None
+    """Per-symptom delta: what the triage LLM classified vs. heuristic pre-mark, and the rationale."""
+    deprescribing_recommendations: Optional[List[Dict[str, Any]]] = None
+    """Populated by assess_and_deprescribe() — raw deprescribing recommendation dicts from unified LLM call."""
+    whats_changed: Optional[str] = None
+    """Populated by assess_and_deprescribe() — narrative summary of what changed clinically."""
+    historical_prescription: List[str] = field(default_factory=list)
+    latest_documented_prescription: List[str] = field(default_factory=list)
+    patient_reported_current_use: List[str] = field(default_factory=list)
+    actual_discontinuation: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Medication Extraction Helpers (Distinguish Prescriptions from Current Use)
+# ---------------------------------------------------------------------------
+
+def _extract_patient_reported_meds(current_symptoms: List[str]) -> List[str]:
+    """Heuristically extract patient-reported currently used medications from intake strings."""
+    meds: List[str] = []
+    use_pattern = re.compile(
+        r"(?:currently\s+)?(?:taking|takes|on|uses|using|compliant\s+with|continuing|continued)\s+"
+        r"(?:tab(?:let)?\.?\s+|cap(?:sule)?\.?\s+)?([A-Za-z0-9\-\.\+\/]+(?:\s+[A-Za-z0-9\-\.\+\/]+){0,3})",
+        re.IGNORECASE,
+    )
+    for sym in current_symptoms:
+        if not isinstance(sym, str):
+            continue
+        s_clean = sym.strip()
+        if re.search(r"\b(?:not|stopped|discontinued|stopped\s+taking|never)\b", s_clean, re.IGNORECASE):
+            continue
+        m = use_pattern.search(s_clean)
+        if m:
+            med_text = m.group(1).strip()
+            med_text = re.sub(r"[,;:\.\?]+$", "", med_text).strip()
+            if med_text and med_text.lower() not in ("medication", "medications", "meds", "pills", "drugs"):
+                meds.append(med_text)
+    return list(dict.fromkeys(meds))
+
+
+def _extract_discontinued_meds(
+    current_symptoms: List[str],
+    change_assessment: Optional[Any] = None,
+    historical_prescription: Optional[List[str]] = None,
+    latest_documented_prescription: Optional[List[str]] = None,
+) -> List[str]:
+    """Extract medications confirmed stopped or discontinued by patient, doctor, or assessment."""
+    discontinued: List[str] = []
+    if change_assessment:
+        recs = getattr(change_assessment, "deprescribing_recommendations", None) or []
+        for r in recs:
+            if isinstance(r, dict):
+                act = str(r.get("action") or "").lower()
+                status = str(r.get("status_change") or r.get("status") or "").lower()
+                med = str(r.get("medicine") or r.get("drug") or "").strip()
+                if (act == "stop" or status in ("resolved", "stop")) and med:
+                    discontinued.append(med)
+            elif hasattr(r, "action"):
+                act = str(r.action or "").lower()
+                status = str(getattr(r, "status_change", None) or "").lower()
+                med = str(getattr(r, "medicine", "")).strip()
+                if (act == "stop" or status in ("resolved", "stop")) and med:
+                    discontinued.append(med)
+
+        if getattr(change_assessment, "actual_discontinuation", None):
+            discontinued.extend(change_assessment.actual_discontinuation)
+
+    disc_pattern = re.compile(
+        r"(?:stopped|discontinued|off|omitted|withdrawn|held|not\s+taking|stopped\s+taking)\s+"
+        r"(?:tab(?:let)?\.?\s+|cap(?:sule)?\.?\s+)?([A-Za-z0-9\-\.\+\/]+(?:\s+[A-Za-z0-9\-\.\+\/]+){0,3})",
+        re.IGNORECASE,
+    )
+    for sym in current_symptoms:
+        if not isinstance(sym, str):
+            continue
+        m = disc_pattern.search(sym.strip())
+        if m:
+            med_text = m.group(1).strip()
+            med_text = re.sub(r"[,;:\.\?]+$", "", med_text).strip()
+            if med_text and med_text.lower() not in ("medication", "medications", "meds", "pills", "drugs"):
+                discontinued.append(med_text)
+
+    return list(dict.fromkeys(discontinued))
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +505,17 @@ def compute_delta(
         notes = ""
         if change_assessment:
             notes = change_assessment.symptom_notes or change_assessment.patient_condition
+
+        patient_reported_use = (
+            change_assessment.patient_reported_current_use
+            if change_assessment and change_assessment.patient_reported_current_use
+            else _extract_patient_reported_meds(current_symptoms)
+        )
+        actual_disc = (
+            change_assessment.actual_discontinuation
+            if change_assessment and change_assessment.actual_discontinuation
+            else _extract_discontinued_meds(current_symptoms=current_symptoms, change_assessment=change_assessment)
+        )
         return {
             "new_symptoms": cur_syms,
             "maintained_symptoms": [],
@@ -413,6 +526,10 @@ def compute_delta(
             "maintained_diagnoses": [],
             "stop_diagnoses": [],
             "prior_medications": [],
+            "historical_prescription": [],
+            "latest_documented_prescription": [],
+            "patient_reported_current_use": patient_reported_use,
+            "actual_discontinuation": actual_disc,
             "clinical_notes": notes or ("New consultation. No prior history." if (cur_syms or cur_dxs) else ""),
         }
 
@@ -500,10 +617,9 @@ def compute_delta(
                 if p_match:
                     matched_past_terms.add(p_match)
 
-        # Symptoms seen in prior visits that were NOT matched by current active or negated symptoms are resolved
-        for p in past_symptom_terms:
-            if p not in matched_past_terms and p not in stop_symptoms:
-                stop_symptoms.append(p)
+        # NOTE: Past symptoms not mentioned in the current visit are NOT automatically resolved.
+        # Absence of mention ≠ resolved — chronic/psychiatric conditions persist until explicitly
+        # denied or the LLM (in the deprescribe step) determines otherwise from full clinical history.
 
     elif change_assessment and change_assessment.symptoms:
         # Legacy fallback if triaged_items wasn't populated
@@ -533,9 +649,9 @@ def compute_delta(
                 if p_match:
                     matched_past_terms.add(p_match)
 
-        for p in past_symptom_terms:
-            if p not in matched_past_terms and p not in stop_symptoms:
-                stop_symptoms.append(p)
+        # NOTE: Past symptoms not mentioned in the current visit are NOT automatically resolved.
+        # Absence of mention ≠ resolved — chronic/psychiatric conditions persist until explicitly
+        # denied or the LLM (in the deprescribe step) determines otherwise from full clinical history.
     else:
         # Fallback without change_assessment: apply heuristic triage to current_symptoms
         active_cur_syms: Dict[str, str] = {}
@@ -551,10 +667,8 @@ def compute_delta(
 
         for past_term in past_symptom_terms:
             matched_current = _find_match(past_term, active_cur_syms)
-            if matched_current is None:
-                if past_term not in stop_symptoms:
-                    stop_symptoms.append(past_term)
-            else:
+            if matched_current is not None:
+                # Only classify trajectory for symptoms that ARE present in current visit
                 status = classify_entity_change(matched_current, {past_term})
                 if status == "increased":
                     increased_symptoms.append(matched_current)
@@ -564,6 +678,8 @@ def compute_delta(
                     stop_symptoms.append(matched_current)
                 else:
                     maintained_symptoms.append(matched_current)
+            # NOTE: If past_term is NOT in current visit, do NOT auto-classify as stop.
+            # Absence of mention ≠ resolved. The deprescribe LLM sees full history and decides.
 
         for cur_low, cur_orig in active_cur_syms.items():
             if _find_match(cur_low, {p: p for p in past_symptom_terms}) is None:
@@ -607,6 +723,33 @@ def compute_delta(
     if change_assessment:
         notes = change_assessment.symptom_notes or change_assessment.patient_condition
 
+    latest_doc_meds: List[str] = list(dict.fromkeys(_extract_meds(past_cases[-1]))) if past_cases else []
+    historical_prescription = (
+        change_assessment.historical_prescription
+        if change_assessment and change_assessment.historical_prescription
+        else unique_past_meds
+    )
+    latest_documented_prescription = (
+        change_assessment.latest_documented_prescription
+        if change_assessment and change_assessment.latest_documented_prescription
+        else latest_doc_meds
+    )
+    patient_reported_current_use = (
+        change_assessment.patient_reported_current_use
+        if change_assessment and change_assessment.patient_reported_current_use
+        else _extract_patient_reported_meds(current_symptoms)
+    )
+    actual_discontinuation = (
+        change_assessment.actual_discontinuation
+        if change_assessment and change_assessment.actual_discontinuation
+        else _extract_discontinued_meds(
+            current_symptoms=current_symptoms,
+            change_assessment=change_assessment,
+            historical_prescription=historical_prescription,
+            latest_documented_prescription=latest_documented_prescription,
+        )
+    )
+
     return {
         "new_symptoms": new_symptoms,
         "maintained_symptoms": maintained_symptoms,
@@ -617,6 +760,10 @@ def compute_delta(
         "maintained_diagnoses": maintained_diagnoses,
         "stop_diagnoses": stop_diagnoses,
         "prior_medications": unique_past_meds,
+        "historical_prescription": historical_prescription,
+        "latest_documented_prescription": latest_documented_prescription,
+        "patient_reported_current_use": patient_reported_current_use,
+        "actual_discontinuation": actual_discontinuation,
         "clinical_notes": notes,
     }
 
@@ -776,18 +923,47 @@ class ChiefComplaintChangeService:
         visit_type: Optional[str] = None,
         current_date: Optional[str] = None,
     ) -> ClinicalChangeAssessment:
-        """Classify changes in current chief complaints compared to prior visits."""
+        """Classify changes in current chief complaints compared to prior visits (delegates to unified assess_and_deprescribe)."""
+        return self.assess_and_deprescribe(
+            current_symptoms=current_symptoms,
+            past_cases=past_cases,
+            prior_medications=[],
+            patient_info=patient_info,
+            visit_type=visit_type,
+            current_date=current_date,
+        )
+
+    def assess_and_deprescribe(
+        self,
+        *,
+        current_symptoms: List[str],
+        past_cases: List[Dict[str, Any]],
+        prior_medications: List[str],
+        patient_info: Any = None,
+        visit_type: Optional[str] = None,
+        current_date: Optional[str] = None,
+    ) -> ClinicalChangeAssessment:
+        """Single unified LLM call that performs triage + deprescribing in one pass.
+
+        Replaces the previous two-step pattern of:
+          1. assess_symptom_changes() -> triage LLM call
+          2. build_deprescribe_prompt() -> deprescribe LLM call
+
+        The unified prompt (triage_deprescribe_prompt.md) returns both
+        ``triaged_items`` and ``deprescribing_recommendations`` in one JSON response.
+        The result is stored in a ClinicalChangeAssessment so the rest of the pipeline
+        (SapBERT embedding, compute_delta, generate_clinical_summary) works unchanged.
+        """
         if not current_symptoms:
             return ClinicalChangeAssessment(
-                symptoms=[],
                 patient_condition="No chief complaints recorded for current visit.",
                 symptom_notes="No symptoms to assess.",
                 used_llm=False,
+                deprescribing_recommendations=[],
+                whats_changed="No symptoms recorded at this visit.",
             )
 
-        # ---------------------------------------------------------------
-        # Step 1 & 2: Build past symptom terms and match
-        # ---------------------------------------------------------------
+        # --- Build keyword pre-marks (same as assess_symptom_changes) ---
         past_symptom_dict: Dict[str, str] = {}
         for visit in past_cases:
             syms = visit.get("chiefComplaints") or visit.get("symptoms") or []
@@ -797,236 +973,139 @@ class ChiefComplaintChangeService:
                 if t_str:
                     past_symptom_dict[t_str.lower()] = t_str
 
-        # ---------------------------------------------------------------
-        # Step 3: Heuristic triage and keyword pre-marking
-        # ---------------------------------------------------------------
         keyword_results: List[Dict[str, Any]] = []
         for sym in current_symptoms:
             s_clean = sym.strip()
             if not s_clean:
                 continue
-
             category, canonical = heuristic_triage_complaint(s_clean)
-
             if category == "non_symptom":
                 keyword_results.append({
-                    "complaint": s_clean,
-                    "category": "non_symptom",
-                    "canonical_entity": None,
-                    "matched_past": "None",
+                    "complaint": s_clean, "category": "non_symptom",
+                    "canonical_entity": None, "matched_past": "None",
                     "condition_note": "Administrative metadata or clinical directive (non-symptom)",
-                    "kw_status": None,
-                    "display_kw": "non_symptom",
+                    "kw_status": None, "display_kw": "non_symptom",
                 })
             elif category == "global_status":
                 keyword_results.append({
-                    "complaint": s_clean,
-                    "category": "global_status",
-                    "canonical_entity": None,
-                    "matched_past": "None",
+                    "complaint": s_clean, "category": "global_status",
+                    "canonical_entity": None, "matched_past": "None",
                     "condition_note": "Whole-patient condition statement (global status)",
-                    "kw_status": None,
-                    "display_kw": "global_status",
+                    "kw_status": None, "display_kw": "global_status",
                 })
             elif category == "negated_symptom":
                 canon = canonical or s_clean
                 matched_past, _ = _match_symptom_condition(canon, past_symptom_dict)
                 keyword_results.append({
-                    "complaint": s_clean,
-                    "category": "negated_symptom",
-                    "canonical_entity": canon,
-                    "matched_past": matched_past or "None",
+                    "complaint": s_clean, "category": "negated_symptom",
+                    "canonical_entity": canon, "matched_past": matched_past or "None",
                     "condition_note": f"Negated/denied symptom, canonical entity '{canon}'",
-                    "kw_status": "stop",
-                    "display_kw": "resolved",
+                    "kw_status": "stop", "display_kw": "resolved",
                 })
             else:
                 matched_past, condition_note = _match_symptom_condition(s_clean, past_symptom_dict)
                 kw_status = classify_entity_change(s_clean, set(past_symptom_dict.values()))
-
-                if kw_status == "decreased":
-                    display_kw = "improved"
-                elif kw_status == "increased":
-                    display_kw = "worsened"
-                elif kw_status == "stop":
-                    display_kw = "resolved"
-                elif kw_status == "new":
-                    display_kw = "new"
-                else:
-                    display_kw = "maintained"
-
+                display_kw = {
+                    "decreased": "improved", "increased": "worsened",
+                    "stop": "resolved", "new": "new",
+                }.get(kw_status, "maintained")
                 keyword_results.append({
-                    "complaint": s_clean,
-                    "category": "symptom",
-                    "canonical_entity": canonical or s_clean,
-                    "matched_past": matched_past or "None",
-                    "condition_note": condition_note,
-                    "kw_status": kw_status,
-                    "display_kw": display_kw,
+                    "complaint": s_clean, "category": "symptom",
+                    "canonical_entity": canonical or s_clean, "matched_past": matched_past or "None",
+                    "condition_note": condition_note, "kw_status": kw_status, "display_kw": display_kw,
                 })
 
-        # ---------------------------------------------------------------
-        # Step 4: Pass to LLM (confirm current markers + change from history)
-        # ---------------------------------------------------------------
+        # --- Attempt unified LLM call ---
         gemini = self._get_gemini()
         can_call_llm = gemini is not None and getattr(gemini, "is_configured", False)
 
         if can_call_llm:
             try:
-                assessment = self._call_llm_classifier(
-                    gemini=gemini,
-                    current_symptoms=current_symptoms,
+                # Import here to avoid circular import; the function lives in prescription_service
+                from meldai_v2.services.prescription_service import build_unified_triage_deprescribe_prompt
+                unified_prompt = build_unified_triage_deprescribe_prompt(
                     keyword_results=keyword_results,
                     past_cases=past_cases,
+                    prior_medications=prior_medications,
                     patient_info=patient_info,
                     visit_type=visit_type,
                     current_date=current_date,
                 )
-                if assessment is not None:
-                    return assessment
+                raw_text, _metrics = gemini.generate_content_with_metadata(
+                    unified_prompt,
+                    temperature=0.0,
+                    call_name="unified_triage_deprescribe",
+                )
+                if raw_text and raw_text.strip():
+                    assessment = self._parse_unified_response(
+                        raw_text=raw_text,
+                        keyword_results=keyword_results,
+                        unified_prompt=unified_prompt,
+                    )
+                    if assessment is not None:
+                        return assessment
             except Exception as exc:
-                logger.warning("ChiefComplaintChangeService LLM classification failed, falling back to keywords: %s", exc)
+                logger.warning(
+                    "ChiefComplaintChangeService unified LLM call failed, falling back to two-step: %s", exc
+                )
 
-        # ---------------------------------------------------------------
-        # Step 5 (Fallback): Keyword heuristic only
-        # ---------------------------------------------------------------
-        return self._build_keyword_fallback(keyword_results, past_cases)
+        # --- Fallback: keyword heuristic only (no deprescribing recs available) ---
+        fallback = self._build_keyword_fallback(keyword_results, past_cases)
+        fallback.deprescribing_recommendations = []
+        fallback.whats_changed = ""
+        return fallback
 
-    def _call_llm_classifier(
+    def _parse_unified_response(
         self,
-        gemini: Any,
-        current_symptoms: List[str],
+        raw_text: str,
         keyword_results: List[Dict[str, Any]],
-        past_cases: List[Dict[str, Any]],
-        patient_info: Any,
-        visit_type: Optional[str],
-        current_date: Optional[str],
+        unified_prompt: str,
     ) -> Optional[ClinicalChangeAssessment]:
-        prompt = self._build_llm_prompt(
-            keyword_results=keyword_results,
-            past_cases=past_cases,
-            patient_info=patient_info,
-            visit_type=visit_type,
-            current_date=current_date,
-        )
+        """Parse the single JSON response from the unified triage+deprescribe LLM call.
 
-        raw_text, _metrics = gemini.generate_content_with_metadata(
-            prompt,
-            temperature=0.0,
-            call_name="triage_symptom_changes",
-        )
-        if not raw_text or not raw_text.strip():
+        The response contains both ``triaged_items`` and ``deprescribing_recommendations``.
+        The triaged_items section is parsed identically to _parse_llm_response (reusing same
+        norm_map logic). The deprescribing_recommendations section is stored as raw dicts on
+        the ClinicalChangeAssessment so deprescribe_step can use them directly.
+        """
+        # Reuse the existing triage-only parser to build the ClinicalChangeAssessment
+        assessment = self._parse_llm_response(raw_text, keyword_results)
+        if assessment is None:
             return None
 
-        assessment = self._parse_llm_response(raw_text, keyword_results)
-        if assessment is not None:
-            assessment.llm_prompt = prompt
+        # Additionally extract deprescribing_recommendations and whats_changed
+        text = raw_text.strip()
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+        cand = match.group(1).strip() if match else text
+        cand = cand.strip().lstrip("```").lstrip("json").strip().rstrip("`").strip()
+        data: Dict[str, Any] = {}
+        try:
+            data = json.loads(cand)
+        except Exception:
+            m = re.search(r"(\{[\s\S]*\})", cand)
+            if m:
+                try:
+                    data = json.loads(m.group(1))
+                except Exception:
+                    pass
+
+        assessment.deprescribing_recommendations = data.get("deprescribing_recommendations") or []
+        assessment.whats_changed = str(data.get("whats_changed") or "").strip()
+        assessment.llm_prompt = unified_prompt
+
+        # Extract medication categorization from unified triage+deprescribe LLM response
+        if "historical_prescription" in data and isinstance(data["historical_prescription"], list):
+            assessment.historical_prescription = [str(m).strip() for m in data["historical_prescription"] if str(m).strip()]
+        if "latest_documented_prescription" in data and isinstance(data["latest_documented_prescription"], list):
+            assessment.latest_documented_prescription = [str(m).strip() for m in data["latest_documented_prescription"] if str(m).strip()]
+        if "patient_reported_current_use" in data and isinstance(data["patient_reported_current_use"], list):
+            assessment.patient_reported_current_use = [str(m).strip() for m in data["patient_reported_current_use"] if str(m).strip()]
+        if "actual_discontinuation" in data and isinstance(data["actual_discontinuation"], list):
+            assessment.actual_discontinuation = [str(m).strip() for m in data["actual_discontinuation"] if str(m).strip()]
+
         return assessment
 
-    def _build_llm_prompt(
-        self,
-        keyword_results: List[Dict[str, Any]],
-        past_cases: List[Dict[str, Any]],
-        patient_info: Any,
-        visit_type: Optional[str],
-        current_date: Optional[str],
-    ) -> str:
-        lines: List[str] = []
-        lines.append("You are an expert clinical physician evaluating changes in patient symptoms and intake items.")
-        lines.append("")
-        lines.append("### CLINICAL CONTEXT:")
-        vt = visit_type or ("follow-up" if past_cases else "new consultation")
-        lines.append(f"- Visit Type: {vt}")
-        if patient_info:
-            age = getattr(patient_info, "age", None) if not isinstance(patient_info, dict) else patient_info.get("age")
-            gender = getattr(patient_info, "gender", None) if not isinstance(patient_info, dict) else patient_info.get("gender")
-            if age is not None:
-                lines.append(f"- Patient Age: {age} yrs")
-            if gender:
-                lines.append(f"- Patient Gender: {gender}")
-        if current_date:
-            lines.append(f"- Encounter Date: {current_date}")
-        lines.append("")
 
-        lines.append("### CURRENT INTAKE CHIEF COMPLAINTS (with heuristic pre-triage):")
-        for item in keyword_results:
-            matched = f", past match: '{item['matched_past']}'" if item["matched_past"] != "None" else ""
-            lines.append(
-                f"- \"{item['complaint']}\" [Heuristic category: {item['category']}, mark: {item['display_kw']}{matched}]"
-            )
-        lines.append("")
-
-        lines.append("### PAST MEDICAL HISTORY (chronological prior visits):")
-        if past_cases:
-            for idx, visit in enumerate(past_cases):
-                v_date = visit.get("caseDate") or visit.get("visitDate") or visit.get("date")
-                rel_time = _format_relative_time(v_date, current_date)
-                time_str = f" ({rel_time})" if rel_time else ""
-                v_type = visit.get("visitType") or "visit"
-                lines.append(f"Visit #{idx + 1} - Date: {v_date or 'Unknown'}{time_str} [{v_type}]:")
-
-                syms = visit.get("chiefComplaints") or visit.get("symptoms") or []
-                s_list = []
-                for s in syms:
-                    t = (s.get("term") or s.get("text") or s.get("note") or "") if isinstance(s, dict) else str(s)
-                    if t.strip():
-                        s_list.append(t.strip())
-                lines.append(f"  * Chief complaints: {', '.join(s_list) if s_list else 'None'}")
-
-                dxs = visit.get("diagnosis") or []
-                d_list = []
-                for d in dxs:
-                    t = (d.get("term") or d.get("text") or "") if isinstance(d, dict) else str(d)
-                    if t.strip():
-                        d_list.append(t.strip())
-                lines.append(f"  * Diagnoses: {', '.join(d_list) if d_list else 'None'}")
-        else:
-            lines.append("No prior encounters recorded on file.")
-        lines.append("")
-
-        lines.append("### MANDATORY GROUNDING & TRIAGE RULES:")
-        lines.append("1. STRICT TEXTUAL GROUNDING (ANTI-HALLUCINATION):")
-        lines.append("   - ONLY summarize what is explicitly documented in current intake and past visits.")
-        lines.append("   - NEVER invent clinical impressions (DO NOT state the patient is a 'reliable direct historian', 'well-groomed', or 'cooperative' unless explicitly written in the input text).")
-        lines.append("   - NEVER infer unmentioned negative findings (DO NOT write 'no psychosis', 'no mania', or 'no depression' unless that specific entity was explicitly documented in past visits or negated in current complaints).")
-        lines.append("   - Administrative lines (e.g. 'Informant: patient', 'more history to be taken from wife', 'follow up in 2 weeks') are administrative metadata, NOT symptoms. Do NOT treat them as clinical history.")
-        lines.append("")
-        lines.append("2. 4-WAY TRIAGE OF EACH INTAKE ITEM:")
-        lines.append("   Assign 'category' for each item:")
-        lines.append("   - 'symptom': A genuine active physical or psychiatric symptom (e.g. 'insomnia', 'headache', 'anxiety').")
-        lines.append("     * canonical_entity: core symptom term (e.g. 'anxiety').")
-        lines.append("     * status: 'improved' | 'worsened' | 'maintained' | 'new'.")
-        lines.append("   - 'negated_symptom': A symptom explicitly denied, absent, or resolved (e.g. 'denies paranoia currently', 'no panic attacks').")
-        lines.append("     * canonical_entity: the underlying canonical symptom (e.g. 'paranoia').")
-        lines.append("     * status: 'resolved'.")
-        lines.append("   - 'global_status': An overall statement on patient well-being or absence of all symptoms (e.g. 'Feels much better', 'No active symptoms reported', 'asymptomatic').")
-        lines.append("     * canonical_entity: null, status: 'improved' or 'maintained'.")
-        lines.append("   - 'non_symptom': Administrative metadata, informant details, to-do notes, or directives (e.g. 'Informant: patient', 'more history to be taken from wife').")
-        lines.append("     * canonical_entity: null, status: null.")
-        lines.append("")
-        lines.append("3. NARRATIVE SYNTHESIS:")
-        lines.append("   - 'patient_condition': 1 sentence strictly summarizing overall trajectory based only on provided text.")
-        lines.append("   - 'symptom_notes': 1-2 sentences strictly describing trajectory of real complaints from past to present.")
-        lines.append("")
-        lines.append("Return ONLY a valid JSON object matching this schema:")
-        lines.append("```json")
-        lines.append("{")
-        lines.append('  "patient_condition": "Brief grounded summary...",')
-        lines.append('  "symptom_notes": "Trajectory notes for real symptoms...",')
-        lines.append('  "triaged_items": [')
-        lines.append("    {")
-        lines.append('      "raw_text": "Exact input line",')
-        lines.append('      "category": "symptom" | "negated_symptom" | "global_status" | "non_symptom",')
-        lines.append('      "canonical_entity": "symptom name or null",')
-        lines.append('      "status": "improved" | "worsened" | "maintained" | "resolved" | "new" | null,')
-        lines.append('      "change_description": "Explanation of change or classification rationale",')
-        lines.append('      "notes": "Observation note"')
-        lines.append("    }")
-        lines.append("  ]")
-        lines.append("}")
-        lines.append("```")
-
-        return "\n".join(lines)
 
     def _parse_llm_response(
         self,
@@ -1160,6 +1239,13 @@ class ChiefComplaintChangeService:
             elif category == "global_status":
                 global_status_notes.append(c_name)
 
+            heuristic_mark = kw_item.get("display_kw")
+            heuristic_cat = kw_item.get("category")
+            is_changed = (
+                (display_st is not None and display_st != heuristic_mark)
+                or (category != heuristic_cat)
+            )
+
             triaged_items.append(
                 TriagedComplaintItem(
                     raw_text=c_name,
@@ -1169,8 +1255,14 @@ class ChiefComplaintChangeService:
                     display_status=display_st,
                     change_description=change_desc,
                     notes=notes,
+                    heuristic_mark=heuristic_mark,
+                    heuristic_category=heuristic_cat,
+                    changed=is_changed,
                 )
             )
+
+        # Unified triage_delta is derived directly from triaged_items (single source of truth)
+        triage_delta: List[Dict[str, Any]] = [item.to_dict() for item in triaged_items]
 
         return ClinicalChangeAssessment(
             symptoms=symptom_change_results,
@@ -1182,6 +1274,7 @@ class ChiefComplaintChangeService:
             symptom_notes=str(data.get("symptom_notes") or "").strip(),
             raw_llm_response=raw_text,
             used_llm=True,
+            triage_delta=triage_delta,
         )
 
     def _build_keyword_fallback(
@@ -1248,6 +1341,9 @@ class ChiefComplaintChangeService:
                     display_status=disp_kw,
                     change_description=desc,
                     notes=f"Heuristic triage: {cat}",
+                    heuristic_mark=disp_kw,
+                    heuristic_category=cat,
+                    changed=False,
                 )
             )
 
@@ -1256,6 +1352,15 @@ class ChiefComplaintChangeService:
             cond = f"Overall status: {', '.join(global_status_notes)}"
 
         s_notes = " | ".join(notes_parts) if notes_parts else "No active symptoms reported."
+
+        all_past_meds: List[str] = []
+        for v in past_cases:
+            all_past_meds.extend(_extract_meds(v))
+        unique_past_meds = list(dict.fromkeys(all_past_meds))
+        latest_doc_meds = list(dict.fromkeys(_extract_meds(past_cases[-1]))) if past_cases else []
+        complaints = [it["complaint"] for it in keyword_results if "complaint" in it]
+        patient_use = _extract_patient_reported_meds(complaints)
+        disc_meds = _extract_discontinued_meds(current_symptoms=complaints)
 
         return ClinicalChangeAssessment(
             symptoms=symptom_change_results,
@@ -1267,6 +1372,11 @@ class ChiefComplaintChangeService:
             symptom_notes=s_notes,
             raw_llm_response=None,
             used_llm=False,
+            triage_delta=[it.to_dict() for it in triaged_items],
+            historical_prescription=unique_past_meds,
+            latest_documented_prescription=latest_doc_meds,
+            patient_reported_current_use=patient_use,
+            actual_discontinuation=disc_meds,
         )
 
 

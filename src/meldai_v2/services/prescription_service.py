@@ -1,17 +1,9 @@
 """Prescription Service V2 — Per-Entity Molecule Ranking Orchestrator.
 
 Pipeline:
-  Step 1:  Decorate current case (HPO + MONDO + SapBERT embeddings).
-  Step 1b: Fetch patient's own past visits from MongoDB (delta context).
-  Step 2:  Compute clinical delta + generate human-readable clinical summary.
-  Step 3:  Fetch candidate pool from MongoDB — excluding the current patient
-           (by caseNo) and any records whose visitDate >= current visit date.
-  Step 4:  Delegate per-entity ontology resolution, change classification, and
-           molecule ranking to EntityRankingService (SRP / DIP).
-  Step 7:  LLM Step 1: llmMedCheck (Check & Target Entities / Fill Empty Meds)
-  Step 8:  Update Entity Matrix with Step 1 check results
-  Step 9:  LLM Step 2: llmMedPrescribe (Final Synthesis)
-  Step 10: Local medicine master enrichment & formatting
+  Step 1: Deprescribe / medication action evaluation (independent step / API).
+  Step 2: llmMedCheck (find entities with 0 medications, batch fill from local formulary).
+  Step 3: llmMedPrescribe (prescribing synthesis reproducing doctor patterns).
 """
 
 from __future__ import annotations
@@ -21,13 +13,23 @@ import logging
 from pathlib import Path
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from meldai_v2.req_dtos import PrescribeMedicationsV2Request, RankMoleculesRequest
+from meldai_v2.req_dtos import (
+    CaseInput,
+    DeprescribeRequest,
+    MedCheckRequest,
+    PrescribeMedicationsV2Request,
+    RankMoleculesRequest,
+)
 from meldai_v2.res_dtos import (
+    DeprescribeResponse,
+    DeprescribingRecommendation,
     EntityMoleculeRow,
     LLMStepCall,
+    MedCheckResponse,
     PrescribeMedicationsV2Response,
+    PrescriptionMemoryState,
 )
 from core.config import Settings, get_settings
 from core.db.mongodb import MongoKnowledgeBase
@@ -73,11 +75,7 @@ REPO_ROOT = _find_repo_root()
 
 
 def _build_entity_ranking_service(settings: Settings) -> EntityRankingService:
-    """Factory: wire up and return an EntityRankingService from app settings.
-
-    Isolated here (OCP) so that callers can swap any dependency without
-    touching PrescriptionServiceV2 itself.
-    """
+    """Factory: wire up and return an EntityRankingService from app settings."""
     embedder = get_sapbert_embedder(settings)
     hpo_svc = get_hpo_service(settings.hpo_obo_path)
     mondo_svc = get_mondo_service(settings.mondo_obo_path)
@@ -108,10 +106,8 @@ def strip_special_characters(term: str) -> str:
     """Clean clinical term by stripping punctuation, symbols, brackets, and extraneous characters."""
     if not term:
         return ""
-    # Strip any content inside parenthesis or brackets if it's descriptive/severity notes
     cleaned = re.sub(r"\([^)]*\)", " ", term)
     cleaned = re.sub(r"\[[^\]]*\]", " ", cleaned)
-    # Replace non-alphanumeric (except space)
     cleaned = re.sub(r"[^\w\s]", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned if cleaned else re.sub(r"[^\w\s]", " ", term).strip()
@@ -207,8 +203,127 @@ def save_workflow_prompts_to_file(
 
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+TRIAGE_DEPRESCRIBE_PROMPT_PATH = PROMPTS_DIR / "triage_deprescribe_prompt.md"
 LLM_MED_CHECK_PROMPT_PATH = PROMPTS_DIR / "llm_med_check_prompt.md"
 LLM_MED_PRESCRIBE_PROMPT_PATH = PROMPTS_DIR / "llm_med_prescribe_prompt.md"
+
+
+def _extract_meds_for_prompt(case_doc: Dict[str, Any]) -> List[str]:
+    """Extract medication name strings from a MongoDB case document (for prompt formatting)."""
+    meds = case_doc.get("medications") or case_doc.get("medication") or []
+    result = []
+    for m in meds:
+        if isinstance(m, str) and m.strip():
+            result.append(m.strip())
+        elif isinstance(m, dict):
+            val = (
+                m.get("term")
+                or m.get("original_term")
+                or m.get("brand_name")
+                or m.get("name")
+            )
+            if val:
+                result.append(str(val).strip())
+    return result
+
+
+def build_unified_triage_deprescribe_prompt(
+    keyword_results: List[Dict[str, Any]],
+    past_cases: List[Dict[str, Any]],
+    prior_medications: Optional[List[str]],
+    patient_info: Any = None,
+    visit_type: Optional[str] = None,
+    current_date: Optional[str] = None,
+) -> str:
+    """Render the unified triage + deprescribe prompt (single LLM call replacing two).
+
+    Reads triage_deprescribe_prompt.md and fills in all placeholders.
+    Falls back to an inline version if the file is missing.
+    """
+    template = ""
+    if TRIAGE_DEPRESCRIBE_PROMPT_PATH.is_file():
+        template = TRIAGE_DEPRESCRIBE_PROMPT_PATH.read_text(encoding="utf-8")
+
+    # --- Patient context ---
+    age_str = "Unknown"
+    gender_str = "Unknown"
+    if patient_info:
+        age = getattr(patient_info, "age", None) if not isinstance(patient_info, dict) else patient_info.get("age")
+        gender = getattr(patient_info, "gender", None) if not isinstance(patient_info, dict) else patient_info.get("gender")
+        if age is not None:
+            age_str = f"{age} yrs"
+        if gender:
+            gender_str = str(gender)
+    vt = visit_type or ("follow-up" if past_cases else "new consultation")
+    date_str = current_date or "Unknown"
+
+    # --- Current intake with heuristic pre-marks ---
+    intake_lines = []
+    for item in keyword_results:
+        matched = f", past match: '{item['matched_past']}'" if item["matched_past"] != "None" else ""
+        intake_lines.append(
+            f"- \"{item['complaint']}\" [heuristic: {item['category']}, mark: {item['display_kw']}{matched}]"
+        )
+    intake_str = "\n".join(intake_lines) if intake_lines else "- (no intake items)"
+
+    # --- Past visit history ---
+    if past_cases:
+        hist_lines = []
+        for idx, visit in enumerate(past_cases):
+            v_date = visit.get("caseDate") or visit.get("visitDate") or visit.get("date") or "Unknown"
+            v_type = visit.get("visitType") or "visit"
+            syms = visit.get("chiefComplaints") or visit.get("symptoms") or []
+            s_list = []
+            for s in syms:
+                t = (s.get("term") or s.get("text") or s.get("note") or "") if isinstance(s, dict) else str(s)
+                if t.strip():
+                    s_list.append(t.strip())
+            dxs = visit.get("diagnosis") or []
+            d_list = []
+            for d in dxs:
+                t = (d.get("term") or d.get("text") or "") if isinstance(d, dict) else str(d)
+                if t.strip():
+                    d_list.append(t.strip())
+            meds = _extract_meds_for_prompt(visit)
+            hist_lines.append(f"Visit #{idx + 1} — {v_date} [{v_type}]:")
+            hist_lines.append(f"  Chief complaints: {', '.join(s_list) if s_list else 'None'}")
+            hist_lines.append(f"  Diagnoses: {', '.join(d_list) if d_list else 'None'}")
+            hist_lines.append(f"  Medications prescribed: {', '.join(meds) if meds else 'None'}")
+        history_str = "\n".join(hist_lines)
+    else:
+        history_str = "No prior encounters on record."
+
+    if template:
+        return (
+            template
+            .replace("{visit_type}", vt)
+            .replace("{patient_age}", age_str)
+            .replace("{patient_gender}", gender_str)
+            .replace("{encounter_date}", date_str)
+            .replace("{current_intake_with_heuristics}", intake_str)
+            .replace("{past_visit_history}", history_str)
+        )
+
+    # Inline fallback
+    return f"""You are a clinical pharmacologist and triage physician.
+
+Visit Type: {vt} | Age: {age_str} | Gender: {gender_str} | Date: {date_str}
+
+CURRENT INTAKE:
+{intake_str}
+
+PAST VISITS:
+{history_str}
+
+RULES:
+1. Absence of mention ≠ resolved. Only classify a symptom as resolved if explicitly denied in current intake.
+2. Distinguish past prescriptions in visit history from current medication use:
+   - Past visits record what was prescribed in the past.
+   - Patient-reported current use only includes medications explicitly reported as taken today.
+   - Actual discontinuation includes medications confirmed stopped or discontinued.
+
+Return a single JSON object with keys: patient_condition, symptom_notes, whats_changed, triaged_items (array), deprescribing_recommendations (array), patient_reported_current_use (array), actual_discontinuation (array).
+"""
 
 
 def build_llm_med_check_prompt(
@@ -216,7 +331,7 @@ def build_llm_med_check_prompt(
     entity_matrix_text: str,
     medicine_master: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Build the Step 1 prompt for checking direct/indirect entity targeting and selecting top-k meds for empty entities."""
+    """Build the Step 2 prompt for checking direct/indirect entity targeting and selecting top-k meds for empty entities."""
     template = ""
     if LLM_MED_CHECK_PROMPT_PATH.is_file():
         template = LLM_MED_CHECK_PROMPT_PATH.read_text(encoding="utf-8")
@@ -234,26 +349,25 @@ def build_llm_med_check_prompt(
             .replace("{medicine_master_json}", master_json_str)
         )
 
-    # Fallback inline prompt if file is missing
     return f"""ROLE
 You are an expert clinical psychopharmacology assistant reviewing a patient's clinical entities (symptoms and diagnoses) and their candidate medication associations.
 
 GOAL
-You need to check medications if they can directly or indirectly target the entities present, or select medications for an entity that has empty top meds from the local medication master catalog (select top-k molecules/FDCs).
+For entities identified as having 0 candidate medications, select top-k clinically appropriate candidate molecules or Fixed-Dose Combinations (FDCs) from the local medication master catalog in batch, and report what changed.
 
 <clinical-summary>
 {clinical_summary.strip()}
 </clinical-summary>
 
-<entity-matrix>
+<entities-needing-medications>
 {entity_matrix_text.strip()}
-</entity-matrix>
+</entities-needing-medications>
 
 <medication-master>
 {master_json_str}
 </medication-master>
 
-Respond strictly in valid JSON format with "entity_medication_check" and "summary".
+Respond strictly in valid JSON format with "whats_changed", "entity_medication_check", and "summary".
 """
 
 
@@ -261,7 +375,7 @@ def build_llm_med_prescribe_prompt(
     clinical_summary: str,
     updated_entity_matrix_text: str,
 ) -> str:
-    """Build the Step 2 prompt for prescribing final medications adapting Indian Psychiatrist pattern with updated entity matrix."""
+    """Build the Step 3 prompt for prescribing final medications adapting Indian Psychiatrist pattern with updated entity matrix."""
     template = ""
     if LLM_MED_PRESCRIBE_PROMPT_PATH.is_file():
         template = LLM_MED_PRESCRIBE_PROMPT_PATH.read_text(encoding="utf-8")
@@ -272,7 +386,6 @@ def build_llm_med_prescribe_prompt(
             .replace("{updated_entity_matrix_text}", updated_entity_matrix_text.strip())
         )
 
-    # Fallback inline prompt if file is missing
     return f"""ROLE
 You are an assistant system for a psychiatrist practicing in India.
 
@@ -293,8 +406,10 @@ Respond strictly in valid JSON with "medications" and "explanation".
 
 
 class PrescriptionServiceV2:
-    """Thin orchestrator — coordinates infrastructure calls and delegates
-    per-entity ranking to EntityRankingService (DIP).
+    """Orchestrator for multi-step clinical reasoning:
+      Step 1: Deprescribe / medication action evaluation.
+      Step 2: Med Check (batch fill missing candidate medications for entities with 0 meds).
+      Step 3: Final Prescribing Synthesis.
     """
 
     def __init__(
@@ -314,14 +429,9 @@ class PrescriptionServiceV2:
             gemini_service=self._gemini_service,
             settings=self._settings,
         )
-        # Injected or lazily built (DIP — callers can pass a mock for tests)
         self._entity_ranking_svc = (
             entity_ranking_service or _build_entity_ranking_service(self._settings)
         )
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     def _get_mongo(self) -> MongoKnowledgeBase:
         if self._mongo_kb is not None:
@@ -346,108 +456,81 @@ class PrescriptionServiceV2:
         return []
 
     # ------------------------------------------------------------------
-    # Main public entry point
+    # Context Preparation (Case decoration, delta, clinical summary)
     # ------------------------------------------------------------------
 
-    def prescribe_medications_v2(
+    def _prepare_encounter_context(
         self,
-        request: PrescribeMedicationsV2Request,
-    ) -> PrescribeMedicationsV2Response:
-        """Run the full v2 multi-step prescribing pipeline.
-
-        Steps:
-          1. Fetch patient's past visits from MongoDB (delta context).
-          2. Chief complaints change detection, 4-way triage & noise filtering.
-          3. Decorate current case (HPO + MONDO + SapBERT) using ONLY clean active symptoms.
-          4. Compute clinical delta & generate human-readable clinical summary.
-          5. Fetch candidate pool (excluding current patient + future visit dates).
-          6. Delegate to EntityRankingService.build_entity_matrix() — no LLM.
-          7. Step 1 LLM: llmMedCheck.
-          8. Update Entity Matrix.
-          9. Step 2 LLM: llmMedPrescribe.
-          10. Local medicine master enrichment.
-        """
+        case: CaseInput,
+        run_id: Optional[str] = None,
+    ) -> Tuple[Any, Any, str, List[Dict[str, Any]], Any, str]:
         mongo_kb = self._get_mongo()
-        run_id = generate_run_id(case_no=request.case.caseNo)
+        if not run_id:
+            run_id = generate_run_id(case_no=case.caseNo)
         set_llm_run_context(run_id)
-        vt_str = (
-            request.case.visitType.value
-            if hasattr(request.case.visitType, "value")
-            else str(request.case.visitType)
-        ).lower()
-        is_followup = vt_str in ("follow-up", "follow_up", "followup")
 
-        # Normalize & clean diagnosis terms: remove non-letter characters before letter starts / after letter ends and trim
-        if request.case.diagnosis:
-            cleaned_diag = [clean_diagnosis_term(d) for d in request.case.diagnosis]
-            request.case.diagnosis = [d for d in cleaned_diag if d]
+        # Normalize & clean diagnosis terms
+        if case.diagnosis:
+            cleaned_diag = [clean_diagnosis_term(d) for d in case.diagnosis]
+            case.diagnosis = [d for d in cleaned_diag if d]
 
-        # ---------------------------------------------------------------
-        # Step 1: Fetch past visits (for delta and clinical summary)
-        # ---------------------------------------------------------------
+        # 1. Fetch past visits
         past_cases: List[Dict[str, Any]] = []
-        case_date = request.case.caseDate or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        if request.case.caseNo is not None:
+        case_date = case.caseDate or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if case.caseNo is not None:
             try:
                 past_cases = mongo_kb.find_past_cases(
-                    case_no=request.case.caseNo,
+                    case_no=case.caseNo,
                     before_date=case_date,
                 )
             except Exception as exc:
                 logger.warning("Failed fetching past cases: %s", exc)
 
-        logger.info(
-            "V2 prescribe: caseNo=%s, visit=%s, %d past visits",
-            request.case.caseNo, request.case.visitType.value, len(past_cases),
-        )
+        # 2. Unified triage + deprescribe: single LLM call returns both triaged_items
+        #    (for SapBERT/HPO embedding) and deprescribing_recommendations.
+        prior_meds_across_visits: List[str] = []
+        for v in past_cases:
+            for m in _extract_meds_for_prompt(v):
+                if m not in prior_meds_across_visits:
+                    prior_meds_across_visits.append(m)
 
-        # ---------------------------------------------------------------
-        # Step 2: Chief complaints triage & change detection (Keywords -> LLM)
-        # Filters out administrative metadata, to-do items, global status,
-        # and isolates genuine active symptoms from noise.
-        # ---------------------------------------------------------------
-        change_assessment = self._chief_complaint_service.assess_symptom_changes(
-            current_symptoms=request.case.symptoms,
+        change_assessment = self._chief_complaint_service.assess_and_deprescribe(
+            current_symptoms=case.symptoms,
             past_cases=past_cases,
-            patient_info=request.case.patientInfo,
-            visit_type=request.case.visitType.value,
+            prior_medications=prior_meds_across_visits,
+            patient_info=case.patientInfo,
+            visit_type=case.visitType.value,
             current_date=case_date,
         )
 
-        # Extract only genuine, active symptom entities (isolating HPO/SapBERT from noise)
         clean_symptom_entities: List[str] = (
             change_assessment.active_symptoms
             if change_assessment and change_assessment.active_symptoms is not None
-            else [s for s in request.case.symptoms if heuristic_triage_complaint(s)[0] == "symptom"]
+            else [s for s in case.symptoms if heuristic_triage_complaint(s)[0] == "symptom"]
         )
 
-        # ---------------------------------------------------------------
-        # Step 3: Decorate current case (HPO + MONDO + SapBERT embeddings)
-        # Using ONLY clean active symptom entities
-        # ---------------------------------------------------------------
+        # 3. Decorate current case (HPO + MONDO + SapBERT)
         decorated_case = self._case_service.decorate_case(
-            case_no=request.case.caseNo,
-            patient_info=request.case.patientInfo,
+            case_no=case.caseNo,
+            patient_info=case.patientInfo,
             symptoms=clean_symptom_entities,
-            diagnosis=request.case.diagnosis,
-            visit_type=request.case.visitType.value,
+            diagnosis=case.diagnosis,
+            visit_type=case.visitType.value,
         )
 
-        # ---------------------------------------------------------------
-        # Step 4: Compute clinical delta & generate human-readable clinical summary
-        # ---------------------------------------------------------------
+        # 4. Clinical delta & clinical summary (uses already-triaged assessment)
         delta = compute_delta(
-            current_symptoms=request.case.symptoms,
-            current_diagnoses=request.case.diagnosis,
+            current_symptoms=case.symptoms,
+            current_diagnoses=case.diagnosis,
             past_cases=past_cases,
             change_assessment=change_assessment,
         )
 
         clinical_summary = generate_clinical_summary(
-            current_visit_type=request.case.visitType.value,
-            patient_info=request.case.patientInfo,
-            current_symptoms=request.case.symptoms,
-            current_diagnoses=request.case.diagnosis,
+            current_visit_type=case.visitType.value,
+            patient_info=case.patientInfo,
+            current_symptoms=case.symptoms,
+            current_diagnoses=case.diagnosis,
             past_cases=past_cases,
             current_date=case_date,
             change_assessment=change_assessment,
@@ -456,139 +539,476 @@ class PrescriptionServiceV2:
         save_response_to_tmp(clinical_summary, run_id=f"{run_id}_clinical_summary")
         if change_assessment and change_assessment.symptom_notes:
             save_response_to_tmp(change_assessment.symptom_notes, run_id=f"{run_id}_symptom_notes")
-        logger.info("Clinical summary and symptom change assessment for caseNo=%s generated", request.case.caseNo)
 
-        # ---------------------------------------------------------------
-        # Step 5: Fetch candidate pool — excluding current patient's case
-        #         and any case whose visitDate >= current visit date.
-        # ---------------------------------------------------------------
-        candidate_pool_limit = getattr(request, "candidate_pool_limit", 500)
-        try:
-            raw_candidates = mongo_kb.find_similar_candidates(
-                exclude_case_no=request.case.caseNo,
-                limit=candidate_pool_limit,
+        return decorated_case, delta, clinical_summary, past_cases, change_assessment, run_id
+
+    # ------------------------------------------------------------------
+    # Step 1: Deprescribe Step (Independent API & Method)
+    # ------------------------------------------------------------------
+
+    def deprescribe_step(
+        self,
+        request: Union[DeprescribeRequest, PrescribeMedicationsV2Request, PrescribeMedicationsV2Response],
+    ) -> DeprescribeResponse:
+        """Step 1: Deprescribe / medication action evaluation.
+
+        Evaluates current symptoms/diagnoses and prior medications to determine
+        stop | maintained | decreased | increased | new actions.
+        Returns the LLM's response + what's changed string field + updated state.
+        """
+        if isinstance(request, PrescribeMedicationsV2Response):
+            state = request
+            case = state.case
+            if not case:
+                raise ValueError("Encounter case missing from memory state.")
+        elif hasattr(request, "case") and getattr(request, "case") is not None:
+            case = request.case
+            state = getattr(request, "state", None) or PrescribeMedicationsV2Response(case=case)
+        else:
+            raise ValueError("Invalid request format for deprescribe_step.")
+
+        run_id = state.run_id or generate_run_id(case_no=case.caseNo)
+        state.run_id = run_id
+        set_llm_run_context(run_id)
+
+        # Prepare context if clinical_summary or delta not yet prepared
+        if not state.clinical_summary or not state.history_delta:
+            decorated_case, delta, clinical_summary, past_cases, change_assessment, run_id = (
+                self._prepare_encounter_context(case=case, run_id=run_id)
             )
-        except Exception as exc:
-            logger.warning("Failed fetching candidate pool: %s", exc)
-            raw_candidates = []
+            state.clinical_summary = clinical_summary
+            state.history_delta = delta
+            state.past_cases_count = len(past_cases)
+            if change_assessment and getattr(change_assessment, "llm_prompt", None):
+                state.triage_prompt = change_assessment.llm_prompt
+            if change_assessment and getattr(change_assessment, "triage_delta", None) is not None:
+                state.triage_delta = change_assessment.triage_delta
+            # Store unified deprescribing result into state immediately so the caching
+            # check below finds it without a second LLM call.
+            unified_recs = getattr(change_assessment, "deprescribing_recommendations", None)
+            unified_whats_changed = getattr(change_assessment, "whats_changed", None)
+            if unified_recs is not None and state.deprescribe is None:
+                state.deprescribe = LLMStepCall(
+                    prompt=getattr(change_assessment, "llm_prompt", None),
+                    output={
+                        "whats_changed": unified_whats_changed or "",
+                        "deprescribing_recommendations": unified_recs,
+                        "source": "unified_triage_deprescribe",
+                    },
+                )
+        else:
+            clinical_summary = state.clinical_summary
+            delta = state.history_delta
+            past_cases = []  # already stored counts; no re-fetch needed for prompt
 
-        before_dt = parse_clinical_date(case_date)
-        candidates: List[Dict[str, Any]] = []
-        for c in raw_candidates:
-            c_date_val = c.get("visitDate") or c.get("caseDate")
-            if c_date_val and before_dt:
-                c_dt = parse_clinical_date(c_date_val)
-                if c_dt and c_dt.date() >= before_dt.date():
-                    continue
-            candidates.append(c)
-
-        logger.info(
-            "V2 prescribe: candidate pool size=%d (filtered from %d raw)",
-            len(candidates), len(raw_candidates),
+        prior_meds: List[str] = (
+            delta.prior_medications
+            if delta and hasattr(delta, "prior_medications")
+            else []
+        )
+        delta_notes: str = (
+            delta.clinical_notes
+            if delta and hasattr(delta, "clinical_notes")
+            else ""
         )
 
-        # ---------------------------------------------------------------
-        # Step 6: Per-entity molecule ranking — delegated to EntityRankingService
-        # ---------------------------------------------------------------
-        patient_age: Optional[float] = (
-            request.case.patientInfo.age if request.case.patientInfo else None
+        # The unified triage+deprescribe LLM call already ran inside _prepare_encounter_context.
+        # If the change_assessment already carries deprescribing_recommendations, use them directly
+        # without a second LLM call. Only fall back to a standalone deprescribe LLM call when:
+        #   - the state was passed in pre-built (no access to change_assessment), OR
+        #   - it was an explicitly requested DeprescribeRequest with no prior unified result.
+        _cached_deprescribe_recs = None
+        _cached_whats_changed = None
+        _cached_deprescribe_prompt = state.deprescribe.prompt if state.deprescribe else None
+
+        # Try to extract deprescribing result from the unified call cached in state
+        if state.deprescribe is not None and state.deprescribe.output:
+            _out = state.deprescribe.output
+            if isinstance(_out, dict):
+                _cached_whats_changed = _out.get("whats_changed") or ""
+                _cached_deprescribe_recs = _out.get("deprescribing_recommendations") or []
+
+        # Check if prior meds exist OR there are past cases; skip if neither (initial visit, no meds)
+        has_context = bool(prior_meds) or bool(getattr(state, "past_cases_count", 0))
+
+        whats_changed: str = ""
+        recs_data: List[Any] = []
+
+        if _cached_deprescribe_recs is not None:
+            # Unified call result is available — no second LLM call needed
+            deprescribe_prompt = _cached_deprescribe_prompt or ""
+            whats_changed = _cached_whats_changed or ""
+            recs_data = _cached_deprescribe_recs or []
+            llm_result = state.deprescribe.output if isinstance(state.deprescribe.output, dict) else {}
+        elif not has_context and not isinstance(request, DeprescribeRequest):
+            # No prior meds or history — initial visit shortcut
+            whats_changed = "No prior medications recorded; initial evaluation with all clinical symptoms considered new."
+            llm_result = {
+                "whats_changed": whats_changed,
+                "deprescribing_recommendations": [],
+                "status": "skipped",
+            }
+            deprescribe_prompt = _cached_deprescribe_prompt or ""
+        else:
+            # Run the unified triage + deprescribing step (Step 1)
+            assessment = self._chief_complaint_service.assess_and_deprescribe(
+                current_symptoms=case.symptoms,
+                past_cases=past_cases,
+                prior_medications=prior_meds,
+                patient_info=case.patientInfo,
+                visit_type=case.visitType.value,
+                current_date=getattr(case, "caseDate", None),
+            )
+            deprescribe_prompt = assessment.llm_prompt or ""
+            state.triage_delta = assessment.triage_delta
+            recs_data = [
+                r if isinstance(r, dict) else r.model_dump()
+                for r in (assessment.deprescribing_recommendations or [])
+            ]
+            whats_changed = assessment.whats_changed or ""
+            llm_result = {
+                "whats_changed": whats_changed,
+                "deprescribing_recommendations": recs_data,
+                "triage_delta": assessment.triage_delta,
+            }
+
+        # Extract what's changed and recommendations
+        if not whats_changed:
+            if isinstance(llm_result, dict):
+                whats_changed = (
+                    llm_result.get("whats_changed")
+                    or llm_result.get("summary")
+                    or llm_result.get("clinical_summary")
+                    or ""
+                )
+                if not recs_data:
+                    recs_data = (
+                        llm_result.get("deprescribing_recommendations")
+                        or llm_result.get("recommendations")
+                        or llm_result.get("actions")
+                        or []
+                    )
+            elif isinstance(llm_result, list):
+                recs_data = llm_result
+
+        recommendations: List[DeprescribingRecommendation] = []
+        for r in recs_data:
+            if isinstance(r, DeprescribingRecommendation):
+                recommendations.append(r)
+            elif isinstance(r, dict):
+                try:
+                    recommendations.append(
+                        DeprescribingRecommendation(
+                            medicine=r.get("medicine") or r.get("drug") or "Unknown",
+                            target_symptom=r.get("target_symptom") or r.get("symptom") or "General presentation",
+                            status_change=r.get("status_change") or r.get("status") or "maintained",
+                            action=r.get("action") or "maintained",
+                            rationale=r.get("rationale") or "",
+                            taper_plan=r.get("taper_plan"),
+                        )
+                    )
+                except Exception as exc:
+                    logger.debug("Failed parsing DeprescribingRecommendation: %s", exc)
+
+        if not whats_changed:
+            if recommendations:
+                actions_summary = ", ".join(
+                    f"{r.action} {r.medicine} for {r.target_symptom}"
+                    for r in recommendations[:4]
+                )
+                whats_changed = f"Medication actions recommended: {actions_summary}."
+            else:
+                whats_changed = "No medication changes required; continuing current clinical management."
+
+        # Update unified memory state
+        state.deprescribe = LLMStepCall(
+            prompt=deprescribe_prompt,
+            output={k: v for k, v in llm_result.items() if k not in ("raw_response", "prompt")}
+            if isinstance(llm_result, dict)
+            else llm_result,
         )
-        patient_gender: Optional[str] = (
-            request.case.patientInfo.gender if request.case.patientInfo else None
-        )
+        state.deprescribing_recommendations = recommendations
+        state.whats_changed = whats_changed
 
-        entity_matrix: List[EntityMoleculeRow] = self._entity_ranking_svc.build_entity_matrix(
-            decorated_case=decorated_case,
-            candidates=candidates,
-            delta=delta,
-            past_cases=past_cases,
-            patient_age=patient_age,
-            patient_gender=patient_gender,
-            top_k=request.top_k_per_entity,
-        )
-
-        # ---------------------------------------------------------------
-        # Step 7: Step 1 LLM Call — llmMedCheck (Check & Target Entities / Fill Empty Meds)
-        # ---------------------------------------------------------------
-        master_list = self.load_medicine_master()
-        entity_matrix_text = format_entity_matrix_for_prompt(entity_matrix)
-        step1_prompt = build_llm_med_check_prompt(
-            clinical_summary=clinical_summary,
-            entity_matrix_text=entity_matrix_text,
-            medicine_master=master_list,
-        )
-
-        save_prompt_to_tmp(step1_prompt, run_id=f"{run_id}_step1_llm_med_check_prompt")
-        logger.info("Prescription V2: executing Step 1 llmMedCheck for caseNo=%s", request.case.caseNo)
-
-        step1_result = self._gemini_service.generate_prescription(
-            step1_prompt,
-            run_id=run_id,
-            call_name="llm_med_check",
-        )
-
-        step1_time = step1_result.get("response_time_seconds", 0.0)
-        step1_tokens = step1_result.get("tokens_used", {})
-        step1_cost = step1_result.get("cost_usd", 0.0)
-
-        # ---------------------------------------------------------------
-        # Step 8: Update Entity Matrix with Step 1 Check Results
-        # ---------------------------------------------------------------
-        entity_check_list: List[Dict[str, Any]] = (
-            step1_result.get("entity_medication_check")
-            or step1_result.get("entity_checks")
+        # Populate separate medication history & current use fields
+        state.historical_prescription = (
+            getattr(delta, "historical_prescription", None)
+            or (delta.get("historical_prescription") if isinstance(delta, dict) else [])
             or []
         )
-        if isinstance(entity_check_list, list):
-            check_map: Dict[str, Dict[str, Any]] = {}
-            for item in entity_check_list:
-                if isinstance(item, dict):
-                    ent_k = (item.get("entity") or "").strip().lower()
-                    if ent_k:
-                        check_map[ent_k] = item
+        state.latest_documented_prescription = (
+            getattr(delta, "latest_documented_prescription", None)
+            or (delta.get("latest_documented_prescription") if isinstance(delta, dict) else [])
+            or []
+        )
+        state.patient_reported_current_use = (
+            getattr(delta, "patient_reported_current_use", None)
+            or (delta.get("patient_reported_current_use") if isinstance(delta, dict) else [])
+            or []
+        )
+        actual_disc = list(
+            getattr(delta, "actual_discontinuation", None)
+            or (delta.get("actual_discontinuation") if isinstance(delta, dict) else [])
+            or []
+        )
+        for r in recommendations:
+            if getattr(r, "action", "") == "stop" or getattr(r, "status_change", "") in ("resolved", "stop"):
+                med_name = getattr(r, "medicine", "")
+                if med_name and med_name not in actual_disc:
+                    actual_disc.append(med_name)
+        state.actual_discontinuation = actual_disc
 
-            for row in entity_matrix:
-                ent_k = row.entity.strip().lower()
-                if ent_k in check_map:
-                    c_info = check_map[ent_k]
-                    # Update attributed molecules if provided
-                    attr_mols = c_info.get("attributed_molecules") or []
-                    if attr_mols and isinstance(attr_mols, list):
-                        row.attributed_molecules = [str(m) for m in attr_mols if str(m).strip()]
-
-                    # If entity had empty or weak top_molecules, update with newly recommended molecules from master
-                    rec_mols = c_info.get("recommended_top_molecules") or []
-                    if rec_mols and isinstance(rec_mols, list):
-                        existing_mol_names = {
-                            (m.get("canonical_molecule") or "").strip().lower()
-                            for m in row.top_molecules
-                            if isinstance(m, dict)
-                        }
-                        for r_mol in rec_mols:
-                            if isinstance(r_mol, dict):
-                                c_name = r_mol.get("canonical_molecule") or r_mol.get("name")
-                                if c_name and str(c_name).strip().lower() not in existing_mol_names:
-                                    row.top_molecules.append({
-                                        "canonical_molecule": c_name,
-                                        "is_fdc": bool(r_mol.get("is_fdc", False)),
-                                        "frequency": r_mol.get("frequency", 1),
-                                        "percentage": r_mol.get("percentage", 100.0),
-                                        "score": r_mol.get("score", 1.0),
-                                        "doctor_brands": r_mol.get("doctor_brands") or [],
-                                    })
-                                    existing_mol_names.add(str(c_name).strip().lower())
-
-        updated_entity_matrix_text = format_entity_matrix_for_prompt(entity_matrix)
-
-        # ---------------------------------------------------------------
-        # Step 9: Step 2 LLM Call — llmMedPrescribe (Final Synthesis based on active_prompt.md)
-        # ---------------------------------------------------------------
-        step2_prompt = build_llm_med_prescribe_prompt(
+        return DeprescribeResponse(
+            whats_changed=whats_changed,
+            llm_response=llm_result,
+            deprescribing_recommendations=recommendations,
+            triage_delta=state.triage_delta,
             clinical_summary=clinical_summary,
+            state=state,
+            historical_prescription=state.historical_prescription,
+            latest_documented_prescription=state.latest_documented_prescription,
+            patient_reported_current_use=state.patient_reported_current_use,
+            actual_discontinuation=state.actual_discontinuation,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2: Med Check Step (Independent API & Method)
+    # ------------------------------------------------------------------
+
+    def med_check_step(
+        self,
+        request: Union[MedCheckRequest, PrescribeMedicationsV2Request, PrescribeMedicationsV2Response],
+    ) -> MedCheckResponse:
+        """Step 2: llm_med_check.
+
+        Performs deprescribe step internally if not yet performed, builds candidate entity matrix,
+        finds entities with 0 medications, asks LLM in batch using local_medicine_master.json
+        to fill missing medications for those specific entities, reports the change,
+        and updates and returns the new state.
+        """
+        # 1. Ensure deprescribe step is run internally
+        if isinstance(request, PrescribeMedicationsV2Response) and request.deprescribe is not None:
+            state = request
+            case = state.case
+        else:
+            deprescribe_res = self.deprescribe_step(request)
+            state = deprescribe_res.state
+            case = state.case
+
+        if not case:
+            raise ValueError("Case details missing for med_check_step.")
+
+        run_id = state.run_id or generate_run_id(case_no=case.caseNo)
+        state.run_id = run_id
+        set_llm_run_context(run_id)
+
+        # 2. Build initial entity matrix if not present
+        if not state.entity_matrix:
+            mongo_kb = self._get_mongo()
+            candidate_pool_limit = 500
+            case_date = case.caseDate or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            try:
+                raw_candidates = mongo_kb.find_similar_candidates(
+                    exclude_case_no=case.caseNo,
+                    limit=candidate_pool_limit,
+                )
+            except Exception as exc:
+                logger.warning("Failed fetching candidate pool: %s", exc)
+                raw_candidates = []
+
+            before_dt = parse_clinical_date(case_date)
+            candidates: List[Dict[str, Any]] = []
+            for c in raw_candidates:
+                c_date_val = c.get("visitDate") or c.get("caseDate")
+                if c_date_val and before_dt:
+                    c_dt = parse_clinical_date(c_date_val)
+                    if c_dt and c_dt.date() >= before_dt.date():
+                        continue
+                candidates.append(c)
+
+            patient_age: Optional[float] = case.patientInfo.age if case.patientInfo else None
+            patient_gender: Optional[str] = case.patientInfo.gender if case.patientInfo else None
+            top_k = getattr(request, "top_k_per_entity", 5)
+
+            clean_symptoms = [
+                s for s in case.symptoms if heuristic_triage_complaint(s)[0] == "symptom"
+            ] or case.symptoms
+
+            decorated_case = self._case_service.decorate_case(
+                case_no=case.caseNo,
+                patient_info=case.patientInfo,
+                symptoms=clean_symptoms,
+                diagnosis=case.diagnosis,
+                visit_type=case.visitType.value,
+            )
+
+            state.entity_matrix = self._entity_ranking_svc.build_entity_matrix(
+                decorated_case=decorated_case,
+                candidates=candidates,
+                delta=state.history_delta,
+                past_cases=[],
+                patient_age=patient_age,
+                patient_gender=patient_gender,
+                top_k=top_k,
+            )
+
+        entity_matrix = state.entity_matrix
+
+        # 3. Find entities with 0 medications
+        empty_entities = [
+            row for row in entity_matrix
+            if not row.top_molecules or len(row.top_molecules) == 0
+        ]
+
+        master_list = self.load_medicine_master()
+        whats_changed = ""
+        step1_result: Any = None
+
+        if empty_entities:
+            # Batch fill missing medications for those specific entities
+            empty_entities_text = format_entity_matrix_for_prompt(empty_entities)
+            step1_prompt = build_llm_med_check_prompt(
+                clinical_summary=state.clinical_summary,
+                entity_matrix_text=empty_entities_text,
+                medicine_master=master_list,
+            )
+            save_prompt_to_tmp(step1_prompt, run_id=f"{run_id}_step2_llm_med_check_prompt")
+            logger.info(
+                "Prescription V2: executing Step 2 llmMedCheck for %d entities with 0 meds (caseNo=%s)",
+                len(empty_entities), case.caseNo,
+            )
+
+            step1_result = self._gemini_service.generate_prescription(
+                step1_prompt,
+                run_id=run_id,
+                call_name="llm_med_check",
+            )
+
+            resp_time = step1_result.get("response_time_seconds", 0.0)
+            tokens = step1_result.get("tokens_used", {})
+            cost = step1_result.get("cost_usd", 0.0)
+            state.metrics["llmMedCheck"] = {
+                "response_time_seconds": resp_time,
+                "tokens_used": tokens,
+                "cost_usd": cost,
+            }
+
+            whats_changed = (
+                step1_result.get("whats_changed")
+                or step1_result.get("summary")
+                or ""
+            )
+
+            # Update entity matrix with newly recommended molecules from master
+            entity_check_list: List[Dict[str, Any]] = (
+                step1_result.get("entity_medication_check")
+                or step1_result.get("entity_checks")
+                or []
+            )
+            if isinstance(entity_check_list, list):
+                check_map: Dict[str, Dict[str, Any]] = {}
+                for item in entity_check_list:
+                    if isinstance(item, dict):
+                        ent_k = (item.get("entity") or "").strip().lower()
+                        if ent_k:
+                            check_map[ent_k] = item
+
+                for row in entity_matrix:
+                    ent_k = row.entity.strip().lower()
+                    if ent_k in check_map:
+                        c_info = check_map[ent_k]
+                        attr_mols = c_info.get("attributed_molecules") or []
+                        if attr_mols and isinstance(attr_mols, list):
+                            row.attributed_molecules = [str(m) for m in attr_mols if str(m).strip()]
+
+                        rec_mols = c_info.get("recommended_top_molecules") or []
+                        if rec_mols and isinstance(rec_mols, list):
+                            existing_mol_names = {
+                                (m.get("canonical_molecule") or "").strip().lower()
+                                for m in row.top_molecules
+                                if isinstance(m, dict)
+                            }
+                            for r_mol in rec_mols:
+                                if isinstance(r_mol, dict):
+                                    c_name = r_mol.get("canonical_molecule") or r_mol.get("name")
+                                    if c_name and str(c_name).strip().lower() not in existing_mol_names:
+                                        row.top_molecules.append({
+                                            "canonical_molecule": c_name,
+                                            "is_fdc": bool(r_mol.get("is_fdc", False)),
+                                            "frequency": r_mol.get("frequency", 1),
+                                            "percentage": r_mol.get("percentage", 100.0),
+                                            "score": r_mol.get("score", 1.0),
+                                            "doctor_brands": r_mol.get("doctor_brands") or [],
+                                        })
+                                        existing_mol_names.add(str(c_name).strip().lower())
+
+            if not whats_changed:
+                filled_names = [e.entity for e in empty_entities]
+                whats_changed = f"Assigned candidate formulary medications for {len(filled_names)} gap entities: {', '.join(filled_names)}."
+
+            state.filled_entities = [e.entity for e in empty_entities]
+            state.llmMedCheck = LLMStepCall(
+                prompt=step1_prompt,
+                output={k: v for k, v in step1_result.items() if k not in ("raw_response", "prompt")},
+            )
+        else:
+            whats_changed = "All clinical entities have existing candidate medication matches; no missing medications required from formulary."
+            step1_result = {"status": "skipped", "message": whats_changed}
+            state.filled_entities = []
+            state.llmMedCheck = LLMStepCall(prompt=None, output=step1_result)
+
+        # Update state
+        state.entity_matrix = entity_matrix
+        state.whats_changed = whats_changed
+        state.whats_changed_med_check = whats_changed
+
+        return MedCheckResponse(
+            whats_changed=whats_changed,
+            llm_response=step1_result,
+            filled_entities=state.filled_entities,
+            entity_matrix=entity_matrix,
+            state=state,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3: Prescribe Step / Full Pipeline Orchestrator
+    # ------------------------------------------------------------------
+
+    def prescribe_medications_v2(
+        self,
+        request: Union[PrescribeMedicationsV2Request, PrescribeMedicationsV2Response],
+    ) -> PrescribeMedicationsV2Response:
+        """Step 3: Prescribing synthesis and full orchestrator.
+
+        Executes Step 1 (deprescribe) and Step 2 (med_check) if not already completed,
+        then executes Step 3 llmMedPrescribe final synthesis reproducing doctor patterns
+        and enriches medications with local medicine master metadata.
+        """
+        if isinstance(request, PrescribeMedicationsV2Response) and request.llmMedCheck is not None:
+            state = request
+            case = state.case
+        else:
+            med_check_res = self.med_check_step(request)
+            state = med_check_res.state
+            case = state.case
+
+        if not case:
+            raise ValueError("Case details missing for prescribe_medications_v2.")
+
+        run_id = state.run_id or generate_run_id(case_no=case.caseNo)
+        state.run_id = run_id
+        set_llm_run_context(run_id)
+
+        # ---------------------------------------------------------------
+        # Step 3 LLM Call — llmMedPrescribe (Final Synthesis)
+        # ---------------------------------------------------------------
+        updated_entity_matrix_text = format_entity_matrix_for_prompt(state.entity_matrix)
+        step2_prompt = build_llm_med_prescribe_prompt(
+            clinical_summary=state.clinical_summary,
             updated_entity_matrix_text=updated_entity_matrix_text,
         )
-        save_prompt_to_tmp(step2_prompt, run_id=f"{run_id}_step2_llm_med_prescribe_prompt")
-        logger.info("Prescription V2: executing Step 2 llmMedPrescribe for caseNo=%s", request.case.caseNo)
+        save_prompt_to_tmp(step2_prompt, run_id=f"{run_id}_step3_llm_med_prescribe_prompt")
+        logger.info("Prescription V2: executing Step 3 llmMedPrescribe for caseNo=%s", case.caseNo)
 
         step2_result = self._gemini_service.generate_prescription(
             step2_prompt,
@@ -596,48 +1016,23 @@ class PrescriptionServiceV2:
             call_name="llm_med_prescribe",
         )
 
-        step2_time = step2_result.get("response_time_seconds", 0.0)
-        step2_tokens = step2_result.get("tokens_used", {})
-        step2_cost = step2_result.get("cost_usd", 0.0)
+        resp_time = step2_result.get("response_time_seconds", 0.0)
+        tokens = step2_result.get("tokens_used", {})
+        cost = step2_result.get("cost_usd", 0.0)
+        state.metrics["llmMedPrescribe"] = {
+            "response_time_seconds": resp_time,
+            "tokens_used": tokens,
+            "cost_usd": cost,
+        }
+        state.metrics["two_step_execution"] = True
 
         final_medications = step2_result.get("medications") or []
-        final_deprescribe = (
-            step2_result.get("deprescribing_recommendations")
-            or step2_result.get("deprescribed_meds")
-            or []
-        )
         final_explanation = step2_result.get("explanation") or ""
 
         # ---------------------------------------------------------------
-        # Step 9.5: Save All Workflow Prompts to Audit File
+        # Local Medicine Master Enrichment & Formatting
         # ---------------------------------------------------------------
-        prompts_to_log: List[Dict[str, str]] = []
-        if change_assessment and change_assessment.llm_prompt:
-            prompts_to_log.append({
-                "title": "Triage & Symptom Change Detection Prompt",
-                "prompt": change_assessment.llm_prompt,
-            })
-        prompts_to_log.append({
-            "title": "Step 1: llmMedCheck Prompt",
-            "prompt": step1_prompt,
-        })
-        prompts_to_log.append({
-            "title": "Step 2: llmMedPrescribe Prompt",
-            "prompt": step2_prompt,
-        })
-
-        workflow_prompts_file = save_workflow_prompts_to_file(
-            run_id=run_id,
-            case_no=request.case.caseNo,
-            visit_type=request.case.visitType.value,
-            prompts=prompts_to_log,
-        )
-        logs_file, _ = get_run_log_file_paths(run_id)
-        llm_log_file = str(logs_file)
-
-        # ---------------------------------------------------------------
-        # Step 10: Local Medicine Master Enrichment & Formatting
-        # ---------------------------------------------------------------
+        master_list = self.load_medicine_master()
         master_by_brand: Dict[str, Dict[str, Any]] = {}
         master_by_molecule: Dict[str, Dict[str, Any]] = {}
         for m in master_list:
@@ -656,7 +1051,11 @@ class PrescriptionServiceV2:
                 b_clean = re.sub(r"\b\d+\s*(?:mg|ml|mcg|g)\b", "", b_key).strip()
                 mol_key = (med.get("canonical_molecule") or "").strip().lower()
 
-                match = master_by_brand.get(b_key) or master_by_brand.get(b_clean) or master_by_molecule.get(mol_key)
+                match = (
+                    master_by_brand.get(b_key)
+                    or master_by_brand.get(b_clean)
+                    or master_by_molecule.get(mol_key)
+                )
                 if match:
                     for field in (
                         "brand_name",
@@ -672,14 +1071,12 @@ class PrescriptionServiceV2:
                         if field in match and field not in m_copy:
                             m_copy[field] = match[field]
 
-                # Ensure canonical_molecule is populated
                 if not m_copy.get("canonical_molecule"):
                     if match and match.get("canonical_molecule"):
                         m_copy["canonical_molecule"] = match["canonical_molecule"]
                     else:
                         m_copy["canonical_molecule"] = m_copy.get("brand_name") or "Unknown"
 
-                # Ensure is_fdc is strictly boolean
                 if "is_fdc" in m_copy:
                     if isinstance(m_copy["is_fdc"], str):
                         m_copy["is_fdc"] = m_copy["is_fdc"].strip().lower() in ("true", "1", "yes")
@@ -705,54 +1102,45 @@ class PrescriptionServiceV2:
                     }
                 enriched_medications.append(m_dict)
 
-        # Calculate aggregated metrics
-        total_resp_time = step1_time + step2_time
-        p_tok = (step1_tokens.get("prompt_tokens", 0) if isinstance(step1_tokens, dict) else 0) + (
-            step2_tokens.get("prompt_tokens", 0) if isinstance(step2_tokens, dict) else 0
-        )
-        c_tok = (step1_tokens.get("candidates_tokens", 0) if isinstance(step1_tokens, dict) else 0) + (
-            step2_tokens.get("candidates_tokens", 0) if isinstance(step2_tokens, dict) else 0
-        )
-        tot_tok = (step1_tokens.get("total_tokens", 0) if isinstance(step1_tokens, dict) else 0) + (
-            step2_tokens.get("total_tokens", 0) if isinstance(step2_tokens, dict) else 0
-        )
-        cost = step1_cost + step2_cost
+        # ---------------------------------------------------------------
+        # Audit Log Prompts
+        # ---------------------------------------------------------------
+        prompts_to_log: List[Dict[str, str]] = []
+        step1_prompt = state.deprescribe.prompt if state.deprescribe else state.triage_prompt
+        if step1_prompt:
+            prompts_to_log.append({
+                "title": "Triage & Symptom Change Detection Prompt",
+                "prompt": step1_prompt,
+            })
+        if state.llmMedCheck and state.llmMedCheck.prompt:
+            prompts_to_log.append({
+                "title": "Step 1: llmMedCheck Prompt",
+                "prompt": state.llmMedCheck.prompt,
+            })
+        prompts_to_log.append({
+            "title": "Step 2: llmMedPrescribe Prompt",
+            "prompt": step2_prompt,
+        })
 
-        metrics = {
-            "response_time_seconds": round(total_resp_time, 4),
-            "tokens_used": {
-                "prompt_tokens": p_tok,
-                "candidates_tokens": c_tok,
-                "total_tokens": tot_tok,
-            },
-            "cost_usd": round(cost, 6),
-            "two_step_execution": True,
-        }
-
-        # Build step 1 & step 2 LLMStepCall DTOs
-        step1_call_dto = LLMStepCall(
-            prompt=step1_prompt,
-            output={k: v for k, v in step1_result.items() if k not in ("raw_response", "prompt")},
+        workflow_prompts_file = save_workflow_prompts_to_file(
+            run_id=run_id,
+            case_no=case.caseNo,
+            visit_type=case.visitType.value,
+            prompts=prompts_to_log,
         )
-        step2_call_dto = LLMStepCall(
+        logs_file, _ = get_run_log_file_paths(run_id)
+
+        # Update final state
+        state.llmMedPrescribe = LLMStepCall(
             prompt=step2_prompt,
             output={k: v for k, v in step2_result.items() if k not in ("raw_response", "prompt")},
         )
+        state.medications = enriched_medications
+        state.explanation = final_explanation
+        state.workflow_prompts_file = workflow_prompts_file
+        state.llm_log_file = str(logs_file)
 
-        return PrescribeMedicationsV2Response(
-            clinical_summary=clinical_summary,
-            llmMedCheck=step1_call_dto,
-            llmMedPrescribe=step2_call_dto,
-            medications=enriched_medications,
-            entity_matrix=entity_matrix,
-            history_delta=delta if is_followup else None,
-            explanation=final_explanation or delta.get("clinical_notes") or clinical_summary,
-            past_cases_count=len(past_cases),
-            run_id=run_id,
-            metrics=metrics,
-            workflow_prompts_file=workflow_prompts_file,
-            llm_log_file=llm_log_file,
-        )
+        return state
 
 
 # Class alias for clean imports

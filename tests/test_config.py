@@ -1,6 +1,6 @@
 """Unit tests for configuration and settings."""
 
-from meldai.config import Settings
+from core.config import Settings
 
 
 def test_settings_default_values():

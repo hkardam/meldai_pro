@@ -4,14 +4,14 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from meldai.api.req_dtos import (
+from meldai_v2.req_dtos import (
     CaseInput,
     PatientInfoInput,
     PrescribeMedicationsV2Request,
     VisitTypeEnum,
 )
-from meldai.api.res_dtos import EntityMoleculeRow
-from meldai.services.prescription_service_v2 import (
+from meldai_v2.res_dtos import EntityMoleculeRow
+from meldai_v2.services.prescription_service import (
     PrescriptionServiceV2,
     build_llm_med_check_prompt,
     build_llm_med_prescribe_prompt,
@@ -239,7 +239,10 @@ def test_prescribe_medications_v2_two_step_execution():
     assessment.worsening_symptoms = []
     assessment.improving_symptoms = []
     assessment.llm_prompt = "TRIAGE & SYMPTOM CHANGE DETECTION PROMPT TEXT"
-    mock_chief_svc.assess_symptom_changes.return_value = assessment
+    assessment.triage_delta = None
+    assessment.deprescribing_recommendations = []
+    assessment.whats_changed = "No prior medications; initial evaluation."
+    mock_chief_svc.assess_and_deprescribe.return_value = assessment
 
     mock_entity_ranking_svc = MagicMock()
     mock_entity_ranking_svc.build_entity_matrix.return_value = [
@@ -341,7 +344,7 @@ def test_prescribe_medications_v2_two_step_execution():
 def test_log_llm_call_console_and_file(capsys):
     """Verify log_llm_call writes both request and response to console and per-run log files."""
     import uuid
-    from meldai.services.gemini_service import get_run_log_file_paths, log_llm_call
+    from core.services.gemini_service import get_run_log_file_paths, log_llm_call
 
     run_id = f"test_run_llm_audit_{uuid.uuid4().hex[:8]}"
     logs_file, tmp_file = get_run_log_file_paths(run_id)
@@ -385,7 +388,7 @@ def test_log_llm_call_console_and_file(capsys):
 def test_gemini_service_offline_mock_logs_to_file():
     """Verify that GeminiService.generate_content_with_metadata records calls to the per-run log file."""
     import uuid
-    from meldai.services.gemini_service import GeminiService, get_run_log_file_paths
+    from core.services.gemini_service import GeminiService, get_run_log_file_paths
 
     mock_settings = MagicMock()
     mock_settings.gemini_api_key = ""
@@ -415,7 +418,7 @@ def test_gemini_service_offline_mock_logs_to_file():
 def test_gemini_service_multiple_calls_append_same_run():
     """Verify that multiple sequential LLM calls in the same run append to the single run log file."""
     import uuid
-    from meldai.services.gemini_service import GeminiService, get_run_log_file_paths
+    from core.services.gemini_service import GeminiService, get_run_log_file_paths
 
     mock_settings = MagicMock()
     mock_settings.gemini_api_key = ""

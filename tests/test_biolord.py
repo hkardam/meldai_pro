@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 import torch
 
-from meldai.nlp.biolord import BioLORDEmbedder, _mean_pooling
-from meldai.services.medicine_master_service import (
+from core.nlp.biolord import BioLORDEmbedder, _mean_pooling
+from core.services.medicine_master_service import (
     MedicineMasterService,
     generate_digest_text,
 )

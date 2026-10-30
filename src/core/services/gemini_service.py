@@ -643,9 +643,26 @@ class GeminiService:
                 "bm25_keywords": list(dict.fromkeys(keywords)),
             })
 
-        # Step 1 llmMedCheck prompt mock
-        if "llm_med_check" in prompt.lower() or "check medication" in prompt.lower() or "directly or indirectly target" in prompt.lower():
+        # Deprescribe prompt mock
+        if "deprescrib" in prompt.lower() or "clinical action definitions" in prompt.lower() or "medication action needed" in prompt.lower():
             return json.dumps({
+                "whats_changed": "Discontinued resolved acute symptom medications and maintained chronic regimen.",
+                "deprescribing_recommendations": [
+                    {
+                        "medicine": "Clonazepam",
+                        "target_symptom": "severe insomnia",
+                        "status_change": "decreased",
+                        "action": "decreased",
+                        "rationale": "Sleep improved; taper acute benzodiazepine to avoid dependence.",
+                        "taper_plan": "Reduce Clonazepam to 0.25 mg at night for 1 week then stop.",
+                    }
+                ],
+            })
+
+        # Step 1 llmMedCheck prompt mock
+        if "llm_med_check" in prompt.lower() or "check medication" in prompt.lower() or "entities-needing-medications" in prompt.lower() or "directly or indirectly target" in prompt.lower():
+            return json.dumps({
+                "whats_changed": "Assigned Escitalopram + Clonazepam and Paracetamol from local formulary for entities lacking candidates.",
                 "entity_medication_check": [
                     {
                         "entity": "severe anxiety",

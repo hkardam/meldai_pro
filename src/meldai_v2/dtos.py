@@ -1,7 +1,9 @@
-"""MeldAI V2 DTOs — aggregates request and response schemas."""
+"""MeldAI V2 DTOs — aggregates request and response schemas and unified memory state."""
 
 from meldai_v2.req_dtos import (
     CaseInput,
+    DeprescribeRequest,
+    MedCheckRequest,
     PatientInfoInput,
     PrescribeMedicationsV2Request,
     RankMoleculesRequest,
@@ -12,18 +14,23 @@ from meldai_v2.req_dtos import (
 from meldai_v2.res_dtos import (
     CandidateMolecule,
     ClinicalDeltaSummary,
+    DeprescribeResponse,
     DeprescribingRecommendation,
     EntityMoleculeRow,
     LLMStepCall,
+    MedCheckResponse,
     PrescribeMedicationsV2Response,
     PrescribePipelineActionResponse,
     PrescribePipelineStatusResponse,
+    PrescriptionMemoryState,
     RankMoleculesResponse,
     RankedMoleculeItem,
 )
 
 __all__ = [
     "PrescribeMedicationsV2Request",
+    "DeprescribeRequest",
+    "MedCheckRequest",
     "RankMoleculesRequest",
     "SimilarityWeightsInput",
     "CaseInput",
@@ -31,6 +38,9 @@ __all__ = [
     "VisitTypeEnum",
     "SimilarityParams",
     "PrescribeMedicationsV2Response",
+    "PrescriptionMemoryState",
+    "DeprescribeResponse",
+    "MedCheckResponse",
     "LLMStepCall",
     "EntityMoleculeRow",
     "RankedMoleculeItem",

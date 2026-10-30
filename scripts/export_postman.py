@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-from meldai.main import create_web_app
+from main import create_web_app
 
 
 def build_postman_collection() -> Dict[str, Any]:
@@ -1031,6 +1031,267 @@ def build_postman_collection() -> Dict[str, Any]:
         "workflow_prompts_file": "/app/tmp/case_332_20261026_120000_abc123_all_prompts.txt",
         "llm_log_file": "/app/tmp/case_332_20261026_120000_abc123_llm_logs.json",
     }
+
+    # 13b. [V2] Step 1: Triage & Deprescribe
+    v2_deprescribe_body = {
+        "case": {
+            "caseNo": 332,
+            "caseDate": "2026-01-24",
+            "visitType": "follow-up",
+            "patientInfo": {
+                "age": 37.0,
+                "gender": "Male",
+            },
+            "symptoms": [
+                "Sadness of mood improved, anxiety reduced",
+                "Mild insomnia remaining",
+            ],
+            "diagnosis": [
+                "MDD WITH ANXIOUS DISTRESS",
+                "INSOMNIA",
+            ],
+        },
+    }
+
+    v2_deprescribe_response = {
+        "whats_changed": "Evaluated 2 prior medications: Clonazepam 0.5mg recommended for tapering due to improved anxiety; Escitalopram 10mg maintained for MDD stability.",
+        "deprescribing_recommendations": [
+            {
+                "medicine": "Clonazepam 0.5mg",
+                "target_symptom": "Anxiety",
+                "status_change": "decreased",
+                "action": "taper",
+                "rationale": "Anxiety is well managed; step down benzodiazepine to avoid tolerance.",
+                "taper_plan": "Reduce to 0.25mg for 7 days then stop.",
+            },
+            {
+                "medicine": "Escitalopram 10mg",
+                "target_symptom": "Depression",
+                "status_change": "maintained",
+                "action": "maintain",
+                "rationale": "Patient shows clinical response; continue therapeutic dose.",
+                "taper_plan": None,
+            },
+        ],
+        "triage_delta": [
+            {
+                "complaint": "Sadness of mood improved, anxiety reduced",
+                "category": "symptom",
+                "canonical_entity": "Sadness of mood",
+                "heuristic_mark": "improved",
+                "llm_status": "improved",
+                "what_changed": "Patient reports noticeable elevation in mood and marked anxiety reduction.",
+            },
+            {
+                "complaint": "Mild insomnia remaining",
+                "category": "symptom",
+                "canonical_entity": "Insomnia",
+                "heuristic_mark": "maintained",
+                "llm_status": "maintained",
+                "what_changed": "Residual sleep maintenance difficulty persists.",
+            },
+        ],
+        "llm_response": {
+            "prompt": "ROLE: Clinical psychopharmacology assistant reviewing prior encounters...",
+            "output": {
+                "whats_changed": "Evaluated 2 prior medications: Clonazepam 0.5mg recommended for tapering; Escitalopram 10mg maintained.",
+                "deprescribing_recommendations": [
+                    {
+                        "medicine": "Clonazepam 0.5mg",
+                        "target_symptom": "Anxiety",
+                        "status_change": "decreased",
+                        "action": "taper",
+                        "rationale": "Anxiety is well managed; step down benzodiazepine to avoid tolerance.",
+                    }
+                ],
+            },
+        },
+        "state": {
+            "case": v2_deprescribe_body["case"],
+            "whats_changed": "Evaluated 2 prior medications: Clonazepam 0.5mg recommended for tapering; Escitalopram 10mg maintained.",
+            "triage_delta": [
+                {
+                    "complaint": "Sadness of mood improved, anxiety reduced",
+                    "category": "symptom",
+                    "canonical_entity": "Sadness of mood",
+                    "llm_status": "improved",
+                }
+            ],
+            "deprescribing_recommendations": [
+                {
+                    "medicine": "Clonazepam 0.5mg",
+                    "target_symptom": "Anxiety",
+                    "status_change": "decreased",
+                    "action": "taper",
+                }
+            ],
+            "historical_prescription": ["Clonazepam 0.5mg", "Escitalopram 10mg"],
+            "latest_documented_prescription": ["Escitalopram 10mg"],
+            "patient_reported_current_use": ["Escitalopram 10mg"],
+            "actual_discontinuation": ["Clonazepam 0.5mg"],
+        },
+        "historical_prescription": ["Clonazepam 0.5mg", "Escitalopram 10mg"],
+        "latest_documented_prescription": ["Escitalopram 10mg"],
+        "patient_reported_current_use": ["Escitalopram 10mg"],
+        "actual_discontinuation": ["Clonazepam 0.5mg"],
+    }
+
+    folders["Prescription & Batch Pipelines"].append(
+        {
+            "name": "[V2] Step 1: Triage & Deprescribe",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json", "type": "text"},
+                    {"key": "Accept", "value": "application/json", "type": "text"},
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": json.dumps(v2_deprescribe_body, indent=2),
+                },
+                "url": {
+                    "raw": "{{base_url}}/api/v2/cases/deprescribe",
+                    "host": ["{{base_url}}"],
+                    "path": ["api", "v2", "cases", "deprescribe"],
+                },
+                "description": (
+                    "V2 Step 1: Unified Triage & Deprescribing evaluation. Evaluates current intake complaints against "
+                    "prior encounters to detect symptom changes (triage_delta: active, resolved, worsening, persistent, improving, new) "
+                    "and determine medication actions (stop, taper, maintain, increase, new) in a single unified prompt. "
+                    "Returns what's changed, triage_delta, deprescribing_recommendations, and the updated memory state."
+                ),
+            },
+            "response": [
+                {
+                    "name": "200 OK",
+                    "originalRequest": {
+                        "method": "POST",
+                        "url": {
+                            "raw": "{{base_url}}/api/v2/cases/deprescribe",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "v2", "cases", "deprescribe"],
+                        },
+                    },
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "header": [{"key": "Content-Type", "value": "application/json"}],
+                    "body": json.dumps(v2_deprescribe_response, indent=2),
+                }
+            ],
+        }
+    )
+
+    # 13c. [V2] Step 2: Med-Check & Missing Medication Filling
+    v2_med_check_body = {
+        "case": v2_prescribe_body["case"],
+        "top_k_per_entity": 5,
+        "enable_deprescribing": True,
+    }
+
+    v2_med_check_response = {
+        "whats_changed": "Entity matrix constructed with 3 entities. Entity 'Severe insomnia' had 0 candidate medications in similarity search; batch filled 3 candidate molecules from local_medicine_master.json (Zolpidem, Etizolam, Melatonin).",
+        "filled_entities": [
+            {
+                "entity": "Severe insomnia",
+                "entity_type": "symptom",
+                "curie": "HP:0002360",
+                "missing_molecules_filled": ["Zolpidem", "Etizolam", "Melatonin"],
+                "rationale": "Filled sedative/hypnotic candidates from local formulary master.",
+            }
+        ],
+        "entity_matrix": [
+            {
+                "entity": "Severe insomnia",
+                "entity_type": "symptom",
+                "curie": "HP:0002360",
+                "delta_status": "NEW",
+                "top_molecules": [
+                    {
+                        "canonical_molecule": "Zolpidem",
+                        "is_fdc": False,
+                        "score": 0.88,
+                        "doctor_brands": ["ZOLAST", "ZOLFRESH"],
+                    }
+                ],
+                "attributed_molecules": ["Zolpidem"],
+            }
+        ],
+        "llm_response": {
+            "prompt": "ROLE: Clinical psychopharmacology assistant reviewing candidate medications...",
+            "output": {
+                "whats_changed": "Batch filled missing candidates for Severe insomnia.",
+                "entity_medication_check": [
+                    {
+                        "entity": "Severe insomnia",
+                        "recommended_top_molecules": [
+                            {
+                                "canonical_molecule": "Zolpidem",
+                                "doctor_brands": ["ZOLAST"],
+                            }
+                        ],
+                    }
+                ],
+            },
+        },
+        "memory_state": {
+            "case": v2_prescribe_body["case"],
+            "whats_changed": "Batch filled missing candidates for Severe insomnia.",
+            "whats_changed_med_check": "Batch filled missing candidates for Severe insomnia.",
+            "entity_matrix": [
+                {
+                    "entity": "Severe insomnia",
+                    "entity_type": "symptom",
+                    "top_molecules": [{"canonical_molecule": "Zolpidem"}],
+                }
+            ],
+        },
+    }
+
+    folders["Prescription & Batch Pipelines"].append(
+        {
+            "name": "[V2] Step 2: Med-Check (Batch Fill Missing Medications)",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json", "type": "text"},
+                    {"key": "Accept", "value": "application/json", "type": "text"},
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": json.dumps(v2_med_check_body, indent=2),
+                },
+                "url": {
+                    "raw": "{{base_url}}/api/v2/cases/med-check",
+                    "host": ["{{base_url}}"],
+                    "path": ["api", "v2", "cases", "med-check"],
+                },
+                "description": (
+                    "V2 Step 2: Runs Step 1 (triage & deprescribing) internally if needed, finds entities with 0 medications in the entity matrix, "
+                    "asks the LLM in batch using local_medicine_master.json to fill missing candidate medications, reports what changed as a string, "
+                    "and returns the updated entity matrix and memory state."
+                ),
+            },
+            "response": [
+                {
+                    "name": "200 OK",
+                    "originalRequest": {
+                        "method": "POST",
+                        "url": {
+                            "raw": "{{base_url}}/api/v2/cases/med-check",
+                            "host": ["{{base_url}}"],
+                            "path": ["api", "v2", "cases", "med-check"],
+                        },
+                    },
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "header": [{"key": "Content-Type", "value": "application/json"}],
+                    "body": json.dumps(v2_med_check_response, indent=2),
+                }
+            ],
+        }
+    )
 
     folders["Prescription & Batch Pipelines"].append(
         {

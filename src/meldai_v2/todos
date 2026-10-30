@@ -1,0 +1,5 @@
+update llm_med_check with pattern prompt.
+
+symptom not written =/= symptom or condition solved, default assume its carried on
+
+similarity cutoff, check sameVisitTypeOnly: false and the hard filters on the candidate pool (tenant, doctor, date range). A pool that is too small or over-filtered is the usual cause of 0 results.

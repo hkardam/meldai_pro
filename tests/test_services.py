@@ -5,18 +5,18 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from meldai.api.req_dtos import (
+from core.dtos.req_dtos import (
     CaseInput,
     FindSimilarCaseRequest,
     PatientInfoInput,
     SimilarityParams,
     VisitTypeEnum,
 )
-from meldai.nlp.medspacy_nlp import SegmentResult
-from meldai.services.assertion_service import ClinicalAssertionService
-from meldai.services.case_service import CaseService
-from meldai.services.migration_service import MigrationService
-from meldai.services.similarity_engine import (
+from core.nlp.medspacy_nlp import SegmentResult
+from core.services.assertion_service import ClinicalAssertionService
+from core.services.case_service import CaseService
+from core.migration.migration_service import MigrationService
+from core.services.similarity_engine import (
     EntityItem,
     compute_composite_score,
     patient_similarity,
@@ -24,10 +24,10 @@ from meldai.services.similarity_engine import (
     term_similarity,
     visit_type_similarity,
 )
-from meldai.services.symptom_service import SymptomService
-from meldai.services.terminology_service import TerminologySearchService
-from meldai.terminology.hpo import HPOResult
-from meldai.terminology.mondo import MONDOResult
+from core.services.symptom_service import SymptomService
+from core.services.terminology_service import TerminologySearchService
+from core.terminology.hpo import HPOResult
+from core.terminology.mondo import MONDOResult
 
 
 def _make_mock_doc(text: str, ent_text: str = "", is_negated: bool = False, modifier_category: str = ""):
@@ -302,7 +302,7 @@ def test_patient_migration_flow_and_decoration():
 
 def test_patient_migration_runner_lifecycle():
     """Verify background runner start, stop, and status tracking."""
-    from meldai.services.chief_complaints_runner import PatientMigrationRunner
+    from core.migration.chief_complaints_runner import PatientMigrationRunner
 
     mock_svc = MagicMock()
     mock_svc.run_patient_migration.return_value = {
@@ -714,7 +714,7 @@ def test_case_service_candidate_ranking_and_filters():
 
 def test_taxonomy_integer_lookups(tmp_path):
     """Test integer-based TaxonomyIndex Wu-Palmer with both int codes and CURIE strings."""
-    from meldai.terminology.taxonomy import TaxonomyIndex
+    from core.terminology.taxonomy import TaxonomyIndex
 
     obo_file = tmp_path / "test.obo"
     obo_file.write_text(

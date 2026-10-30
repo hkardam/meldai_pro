@@ -3,8 +3,8 @@
 from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
-from meldai.db.mongodb import CaseDocument, PatientInfo, PatientAge, ClinicalEntityItem
-from meldai.pipelines.medical_analysis import MedicalAnalysisPipeline
+from core.db.mongodb import CaseDocument, PatientInfo, PatientAge, ClinicalEntityItem
+from core.pipelines.medical_analysis import MedicalAnalysisPipeline
 
 
 def test_case_document_schema():

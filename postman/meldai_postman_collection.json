@@ -995,6 +995,136 @@
           ]
         },
         {
+          "name": "[V2] Step 1: Triage & Deprescribe",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"case\": {\n    \"caseNo\": 332,\n    \"caseDate\": \"2026-01-24\",\n    \"visitType\": \"follow-up\",\n    \"patientInfo\": {\n      \"age\": 37.0,\n      \"gender\": \"Male\"\n    },\n    \"symptoms\": [\n      \"Sadness of mood improved, anxiety reduced\",\n      \"Mild insomnia remaining\"\n    ],\n    \"diagnosis\": [\n      \"MDD WITH ANXIOUS DISTRESS\",\n      \"INSOMNIA\"\n    ]\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v2/cases/deprescribe",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v2",
+                "cases",
+                "deprescribe"
+              ]
+            },
+            "description": "V2 Step 1: Unified Triage & Deprescribing evaluation. Evaluates current intake complaints against prior encounters to detect symptom changes (triage_delta: active, resolved, worsening, persistent, improving, new) and determine medication actions (stop, taper, maintain, increase, new) in a single unified prompt. Returns what's changed, triage_delta, deprescribing_recommendations, and the updated memory state."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v2/cases/deprescribe",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v2",
+                    "cases",
+                    "deprescribe"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"whats_changed\": \"Evaluated 2 prior medications: Clonazepam 0.5mg recommended for tapering due to improved anxiety; Escitalopram 10mg maintained for MDD stability.\",\n  \"deprescribing_recommendations\": [\n    {\n      \"medicine\": \"Clonazepam 0.5mg\",\n      \"target_symptom\": \"Anxiety\",\n      \"status_change\": \"decreased\",\n      \"action\": \"taper\",\n      \"rationale\": \"Anxiety is well managed; step down benzodiazepine to avoid tolerance.\",\n      \"taper_plan\": \"Reduce to 0.25mg for 7 days then stop.\"\n    },\n    {\n      \"medicine\": \"Escitalopram 10mg\",\n      \"target_symptom\": \"Depression\",\n      \"status_change\": \"maintained\",\n      \"action\": \"maintain\",\n      \"rationale\": \"Patient shows clinical response; continue therapeutic dose.\",\n      \"taper_plan\": null\n    }\n  ],\n  \"triage_delta\": [\n    {\n      \"complaint\": \"Sadness of mood improved, anxiety reduced\",\n      \"category\": \"symptom\",\n      \"canonical_entity\": \"Sadness of mood\",\n      \"heuristic_mark\": \"improved\",\n      \"llm_status\": \"improved\",\n      \"what_changed\": \"Patient reports noticeable elevation in mood and marked anxiety reduction.\"\n    },\n    {\n      \"complaint\": \"Mild insomnia remaining\",\n      \"category\": \"symptom\",\n      \"canonical_entity\": \"Insomnia\",\n      \"heuristic_mark\": \"maintained\",\n      \"llm_status\": \"maintained\",\n      \"what_changed\": \"Residual sleep maintenance difficulty persists.\"\n    }\n  ],\n  \"llm_response\": {\n    \"prompt\": \"ROLE: Clinical psychopharmacology assistant reviewing prior encounters...\",\n    \"output\": {\n      \"whats_changed\": \"Evaluated 2 prior medications: Clonazepam 0.5mg recommended for tapering; Escitalopram 10mg maintained.\",\n      \"deprescribing_recommendations\": [\n        {\n          \"medicine\": \"Clonazepam 0.5mg\",\n          \"target_symptom\": \"Anxiety\",\n          \"status_change\": \"decreased\",\n          \"action\": \"taper\",\n          \"rationale\": \"Anxiety is well managed; step down benzodiazepine to avoid tolerance.\"\n        }\n      ]\n    }\n  },\n  \"state\": {\n    \"case\": {\n      \"caseNo\": 332,\n      \"caseDate\": \"2026-01-24\",\n      \"visitType\": \"follow-up\",\n      \"patientInfo\": {\n        \"age\": 37.0,\n        \"gender\": \"Male\"\n      },\n      \"symptoms\": [\n        \"Sadness of mood improved, anxiety reduced\",\n        \"Mild insomnia remaining\"\n      ],\n      \"diagnosis\": [\n        \"MDD WITH ANXIOUS DISTRESS\",\n        \"INSOMNIA\"\n      ]\n    },\n    \"whats_changed\": \"Evaluated 2 prior medications: Clonazepam 0.5mg recommended for tapering; Escitalopram 10mg maintained.\",\n    \"triage_delta\": [\n      {\n        \"complaint\": \"Sadness of mood improved, anxiety reduced\",\n        \"category\": \"symptom\",\n        \"canonical_entity\": \"Sadness of mood\",\n        \"llm_status\": \"improved\"\n      }\n    ],\n    \"deprescribing_recommendations\": [\n      {\n        \"medicine\": \"Clonazepam 0.5mg\",\n        \"target_symptom\": \"Anxiety\",\n        \"status_change\": \"decreased\",\n        \"action\": \"taper\"\n      }\n    ],\n    \"historical_prescription\": [\n      \"Clonazepam 0.5mg\",\n      \"Escitalopram 10mg\"\n    ],\n    \"latest_documented_prescription\": [\n      \"Escitalopram 10mg\"\n    ],\n    \"patient_reported_current_use\": [\n      \"Escitalopram 10mg\"\n    ],\n    \"actual_discontinuation\": [\n      \"Clonazepam 0.5mg\"\n    ]\n  },\n  \"historical_prescription\": [\n    \"Clonazepam 0.5mg\",\n    \"Escitalopram 10mg\"\n  ],\n  \"latest_documented_prescription\": [\n    \"Escitalopram 10mg\"\n  ],\n  \"patient_reported_current_use\": [\n    \"Escitalopram 10mg\"\n  ],\n  \"actual_discontinuation\": [\n    \"Clonazepam 0.5mg\"\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "[V2] Step 2: Med-Check (Batch Fill Missing Medications)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"case\": {\n    \"caseNo\": 332,\n    \"caseDate\": \"2026-01-24\",\n    \"visitType\": \"new consultation\",\n    \"patientInfo\": {\n      \"age\": 37.0,\n      \"gender\": \"Male\"\n    },\n    \"symptoms\": [\n      \"Sadness of mood, anxiety. restlessness. Total duration: 1.5 years, increased since 1.5 months\",\n      \"Severe insomnia\",\n      \"Occasional death wishes\"\n    ],\n    \"diagnosis\": [\n      \"MDD WITH ANXIOUS DISTRESS\",\n      \"INSOMNIA\"\n    ]\n  },\n  \"top_k_per_entity\": 5,\n  \"enable_deprescribing\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v2/cases/med-check",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v2",
+                "cases",
+                "med-check"
+              ]
+            },
+            "description": "V2 Step 2: Runs Step 1 (triage & deprescribing) internally if needed, finds entities with 0 medications in the entity matrix, asks the LLM in batch using local_medicine_master.json to fill missing candidate medications, reports what changed as a string, and returns the updated entity matrix and memory state."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v2/cases/med-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v2",
+                    "cases",
+                    "med-check"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"whats_changed\": \"Entity matrix constructed with 3 entities. Entity 'Severe insomnia' had 0 candidate medications in similarity search; batch filled 3 candidate molecules from local_medicine_master.json (Zolpidem, Etizolam, Melatonin).\",\n  \"filled_entities\": [\n    {\n      \"entity\": \"Severe insomnia\",\n      \"entity_type\": \"symptom\",\n      \"curie\": \"HP:0002360\",\n      \"missing_molecules_filled\": [\n        \"Zolpidem\",\n        \"Etizolam\",\n        \"Melatonin\"\n      ],\n      \"rationale\": \"Filled sedative/hypnotic candidates from local formulary master.\"\n    }\n  ],\n  \"entity_matrix\": [\n    {\n      \"entity\": \"Severe insomnia\",\n      \"entity_type\": \"symptom\",\n      \"curie\": \"HP:0002360\",\n      \"delta_status\": \"NEW\",\n      \"top_molecules\": [\n        {\n          \"canonical_molecule\": \"Zolpidem\",\n          \"is_fdc\": false,\n          \"score\": 0.88,\n          \"doctor_brands\": [\n            \"ZOLAST\",\n            \"ZOLFRESH\"\n          ]\n        }\n      ],\n      \"attributed_molecules\": [\n        \"Zolpidem\"\n      ]\n    }\n  ],\n  \"llm_response\": {\n    \"prompt\": \"ROLE: Clinical psychopharmacology assistant reviewing candidate medications...\",\n    \"output\": {\n      \"whats_changed\": \"Batch filled missing candidates for Severe insomnia.\",\n      \"entity_medication_check\": [\n        {\n          \"entity\": \"Severe insomnia\",\n          \"recommended_top_molecules\": [\n            {\n              \"canonical_molecule\": \"Zolpidem\",\n              \"doctor_brands\": [\n                \"ZOLAST\"\n              ]\n            }\n          ]\n        }\n      ]\n    }\n  },\n  \"memory_state\": {\n    \"case\": {\n      \"caseNo\": 332,\n      \"caseDate\": \"2026-01-24\",\n      \"visitType\": \"new consultation\",\n      \"patientInfo\": {\n        \"age\": 37.0,\n        \"gender\": \"Male\"\n      },\n      \"symptoms\": [\n        \"Sadness of mood, anxiety. restlessness. Total duration: 1.5 years, increased since 1.5 months\",\n        \"Severe insomnia\",\n        \"Occasional death wishes\"\n      ],\n      \"diagnosis\": [\n        \"MDD WITH ANXIOUS DISTRESS\",\n        \"INSOMNIA\"\n      ]\n    },\n    \"whats_changed\": \"Batch filled missing candidates for Severe insomnia.\",\n    \"whats_changed_med_check\": \"Batch filled missing candidates for Severe insomnia.\",\n    \"entity_matrix\": [\n      {\n        \"entity\": \"Severe insomnia\",\n        \"entity_type\": \"symptom\",\n        \"top_molecules\": [\n          {\n            \"canonical_molecule\": \"Zolpidem\"\n          }\n        ]\n      }\n    ]\n  }\n}"
+            }
+          ]
+        },
+        {
           "name": "[V2] Prescribe Medications (Multi-Step Reasoning)",
           "request": {
             "method": "POST",

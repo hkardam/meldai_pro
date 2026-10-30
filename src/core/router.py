@@ -41,7 +41,9 @@ from core.services.symptom_service import SymptomService
 from core.services.terminology_service import TerminologySearchService
 from core.terminology.hpo import HPOResult, get_hpo_service
 from core.terminology.mondo import MONDOResult, get_mondo_service
-from meldai_v2.services.entity_matrix_service import rank_meds
+def rank_meds(*args, **kwargs):
+    from meldai_v2.services.entity_matrix_service import rank_meds as _rm
+    return _rm(*args, **kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +55,11 @@ core_router = APIRouter()
 # ---------------------------------------------------------------------------
 
 def _dep(name: str, fallback: Any) -> Any:
-    """Dynamically resolve dependency from meldai.api.router or core.router (enables mock patching)."""
+    """Dynamically resolve dependency from core.router (enables mock patching)."""
     import sys
-    for mod_name in ("meldai.api.router", "core.router"):
-        mod = sys.modules.get(mod_name)
-        if mod and hasattr(mod, name):
-            return getattr(mod, name)
+    mod = sys.modules.get("core.router")
+    if mod and hasattr(mod, name):
+        return getattr(mod, name)
     return fallback
 
 

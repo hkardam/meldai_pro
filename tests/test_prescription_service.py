@@ -5,13 +5,13 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from meldai.api.req_dtos import (
+from meldai_v1.req_dtos import (
     CaseInput,
     PatientInfoInput,
     PrescribeMedicationsRequest,
     VisitTypeEnum,
 )
-from meldai.api.res_dtos import (
+from meldai_v1.res_dtos import (
     ComponentScores,
     DecoratedCase,
     DecoratedDiagnosisItem,
@@ -20,9 +20,9 @@ from meldai.api.res_dtos import (
     FindSimilarCaseResponse,
     SimilarCaseItem,
 )
-from meldai.main import create_web_app
-from meldai.services.gemini_service import GeminiService
-from meldai.services.prescription_service import PrescriptionService
+from main import create_web_app
+from core.services.gemini_service import GeminiService
+from meldai_v1.services.prescription_service import PrescriptionService
 
 # ---------------------------------------------------------------------------
 # 1. GeminiService Tests
@@ -247,7 +247,7 @@ def test_prescribe_medications_endpoint():
     client = TestClient(app)
 
     mock_presc_svc = MagicMock()
-    from meldai.api.res_dtos import PrescribeMedicationsResponse
+    from meldai_v1.res_dtos import PrescribeMedicationsResponse
 
     mock_presc_svc.prescribe_medications.return_value = PrescribeMedicationsResponse(
         medications=["Metformin 500mg"],
@@ -256,7 +256,7 @@ def test_prescribe_medications_endpoint():
         similarCasesCount=2,
     )
 
-    with patch("meldai.api.router._get_postgres_prescription_service", return_value=mock_presc_svc):
+    with patch("meldai_v1.router._get_postgres_prescription_service", return_value=mock_presc_svc):
         payload = {
             "case": {
                 "caseNo": 1234,
@@ -279,7 +279,7 @@ def test_prescribe_medications_endpoint():
 
 def test_prescription_service_reads_active_prompt_file():
     """Verify that PrescriptionService dynamically reads and embeds active_prompt.md."""
-    from meldai.services.prescription_service import ACTIVE_PROMPT_PATH, get_active_prompt
+    from meldai_v1.services.prescription_service import ACTIVE_PROMPT_PATH, get_active_prompt
 
     active_text = get_active_prompt()
     assert len(active_text) > 0
@@ -302,8 +302,8 @@ def test_prescription_service_reads_active_prompt_file():
 
 def test_prepare_prompt_output_format_constraint_full_medication_master():
     """Verify that both PrescriptionService and PostgresPrescriptionService require full medication master item in output format."""
-    from meldai.services.prescription_service import PrescriptionService
-    from meldai.services.postgres_prescription_service import PostgresPrescriptionService
+    from meldai_v1.services.prescription_service import PrescriptionService
+    from meldai_v1.services.postgres_prescription_service import PostgresPrescriptionService
 
     decorated_case = DecoratedCase(
         caseNo=888,

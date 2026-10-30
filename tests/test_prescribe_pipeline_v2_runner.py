@@ -10,12 +10,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import pytest
-from meldai.api.res_dtos import (
+from meldai_v2.res_dtos import (
     EntityMoleculeRow,
     LLMStepCall,
     PrescribeMedicationsV2Response,
 )
-from meldai.v2.services.prescribe_pipeline_runner import (
+from meldai_v2.services.prescribe_pipeline_runner import (
     PrescribePipelineV2Runner,
     _StreamingJsonArrayWriter,
 )
@@ -122,7 +122,7 @@ def test_v2_runner_start_conflict():
 
 def test_api_v1_and_v2_pipeline_status_endpoints():
     from fastapi.testclient import TestClient
-    from meldai.main import create_web_app
+    from main import create_web_app
 
     app = create_web_app()
     client = TestClient(app)

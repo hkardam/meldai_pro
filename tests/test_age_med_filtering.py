@@ -4,15 +4,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
-from meldai.api.req_dtos import (
+from meldai_v2.req_dtos import (
     CaseInput,
     PatientInfoInput,
     PrescribeMedicationsV2Request,
     RankMoleculesRequest,
     SimilarityWeightsInput,
 )
-from meldai.services.entity_matrix_service import rank_meds, rank_meds_for_entity
-from meldai.services.similarity_engine import patient_info_similarity, patient_similarity
+from meldai_v2.services.entity_matrix_service import rank_meds, rank_meds_for_entity
+from core.services.similarity_engine import patient_info_similarity, patient_similarity
 
 
 def test_patient_info_similarity_zero_age_sim():
@@ -60,10 +60,10 @@ def test_rank_meds_filters_incompatible_age_candidates():
         weights=SimilarityWeightsInput(w_lca=0.5, w_vector=0.5, min_similarity=0.5),
     )
 
-    with patch("meldai.services.entity_matrix_service.get_hpo_service") as mock_hpo_svc, \
-         patch("meldai.services.entity_matrix_service.get_sapbert_embedder") as mock_embedder, \
-         patch("meldai.services.entity_matrix_service.cosine_similarity") as mock_cos, \
-         patch("meldai.services.entity_matrix_service.compute_composite_score") as mock_comp:
+    with patch("meldai_v2.services.entity_matrix_service.get_hpo_service") as mock_hpo_svc, \
+         patch("meldai_v2.services.entity_matrix_service.get_sapbert_embedder") as mock_embedder, \
+         patch("meldai_v2.services.entity_matrix_service.cosine_similarity") as mock_cos, \
+         patch("meldai_v2.services.entity_matrix_service.compute_composite_score") as mock_comp:
 
         mock_hit = MagicMock()
         mock_hit.hpo_id = "HP:0000716"
@@ -108,7 +108,7 @@ def test_rank_meds_for_entity_age_filtering_and_sorting():
         ],
     }
 
-    with patch("meldai.services.entity_matrix_service.compute_composite_score") as mock_comp:
+    with patch("meldai_v2.services.entity_matrix_service.compute_composite_score") as mock_comp:
         mock_comp.return_value = 0.9  # clinical match
 
         row = rank_meds_for_entity(
@@ -151,7 +151,7 @@ def test_prescribe_medications_v2_request_top_k_alias():
 
 def test_prompt_contains_pediatric_guidelines():
     """Verify llm_med_prescribe_prompt.md includes strict pediatric guidelines (<18) and safety contraindications."""
-    prompt_path = Path(__file__).resolve().parent.parent / "src" / "meldai" / "services" / "prompts" / "medication_prediction" / "llm_med_prescribe_prompt.md"
+    prompt_path = Path(__file__).resolve().parent.parent / "src" / "meldai_v2" / "services" / "prompts" / "llm_med_prescribe_prompt.md"
     assert prompt_path.is_file(), "Prompt file must exist"
     content = prompt_path.read_text(encoding="utf-8")
 

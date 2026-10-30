@@ -1,7 +1,7 @@
 """Unit tests for the MedspaCyService — NER, ConText assertion, HPO linking, embedding."""
 
 from unittest.mock import MagicMock, patch
-from meldai.nlp.medspacy_nlp import MedspaCyService, SegmentResult
+from core.nlp.medspacy_nlp import MedspaCyService, SegmentResult
 
 
 def _make_mock_ent(text, is_negated=False, is_historical=False, is_uncertain=False, is_family=False, kb_ents=None):

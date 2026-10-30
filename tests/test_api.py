@@ -1,10 +1,10 @@
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 import numpy as np
-from meldai.main import create_web_app
-from meldai.nlp.medspacy_nlp import SegmentResult
-from meldai.terminology.hpo import HPOResult
-from meldai.terminology.mondo import MONDOResult
+from main import create_web_app
+from core.nlp.medspacy_nlp import SegmentResult
+from core.terminology.hpo import HPOResult
+from core.terminology.mondo import MONDOResult
 
 client = TestClient(create_web_app())
 
@@ -33,7 +33,7 @@ def test_segment_symptoms_endpoint():
         "anxiety while driving", "60% better mood"
     )
 
-    with patch("meldai.api.router.get_medspacy_service", return_value=mock_service):
+    with patch("core.router.get_medspacy_service", return_value=mock_service):
         payload = {"note": "● anxiety while driving\n● 60% better mood"}
         response = client.post("/api/v1/utils/segment-symptoms", json=payload)
 
@@ -68,7 +68,7 @@ def test_segment_symptoms_nlp_error_raises_503():
     mock_service = MagicMock()
     mock_service.process.side_effect = RuntimeError("model not loaded")
 
-    with patch("meldai.api.router.get_medspacy_service", return_value=mock_service):
+    with patch("core.router.get_medspacy_service", return_value=mock_service):
         payload = {"note": "● headache"}
         response = client.post("/api/v1/utils/segment-symptoms", json=payload)
 
@@ -114,8 +114,8 @@ def test_hpo_search_affirmed_endpoint():
         )
     ]
 
-    with patch("meldai.api.router.get_medspacy_service", return_value=mock_nlp), \
-         patch("meldai.api.router.get_hpo_service", return_value=mock_hpo):
+    with patch("core.router.get_medspacy_service", return_value=mock_nlp), \
+         patch("core.router.get_hpo_service", return_value=mock_hpo):
         resp = client.get("/api/v1/hpo/search", params={"term": "playing video games"})
 
     assert resp.status_code == 200
@@ -131,7 +131,7 @@ def test_hpo_search_negated_filtered_endpoint():
     mock_nlp = MagicMock()
     mock_nlp.analyze.return_value = _make_mock_nlp_doc("not playing video games", is_negated=True)
 
-    with patch("meldai.api.router.get_medspacy_service", return_value=mock_nlp):
+    with patch("core.router.get_medspacy_service", return_value=mock_nlp):
         resp = client.get(
             "/api/v1/hpo/search",
             params={"term": "not playing video games", "filter_negated": "true"},
@@ -156,8 +156,8 @@ def test_hpo_search_negated_default_endpoint():
         )
     ]
 
-    with patch("meldai.api.router.get_medspacy_service", return_value=mock_nlp), \
-         patch("meldai.api.router.get_hpo_service", return_value=mock_hpo):
+    with patch("core.router.get_medspacy_service", return_value=mock_nlp), \
+         patch("core.router.get_hpo_service", return_value=mock_hpo):
         resp = client.get(
             "/api/v1/hpo/search",
             params={"term": "not playing video games"},
@@ -223,7 +223,7 @@ def test_load_chief_complaints_success():
         )
     ]
 
-    with patch("meldai.api.router._get_migration_service") as mock_get_svc:
+    with patch("migrations.router._get_migration_service") as mock_get_svc:
         mock_svc = MagicMock()
         mock_svc.run_patient_migration.return_value = {
             "status": "success",
@@ -248,7 +248,7 @@ def test_load_chief_complaints_success():
 
 
 def test_migrate_patients_failure_raises_500():
-    with patch("meldai.api.router._get_migration_service") as mock_get_svc:
+    with patch("migrations.router._get_migration_service") as mock_get_svc:
         mock_svc = MagicMock()
         mock_svc.run_patient_migration.side_effect = RuntimeError("PostgreSQL connection lost")
         mock_get_svc.return_value = mock_svc
@@ -260,7 +260,7 @@ def test_migrate_patients_failure_raises_500():
 
 
 def test_migrate_patients_runner_endpoints():
-    with patch("meldai.api.router.get_patient_migration_runner") as mock_get_runner:
+    with patch("migrations.router.get_patient_migration_runner") as mock_get_runner:
         mock_runner = MagicMock()
         mock_runner.start.return_value = {
             "status": "started",
@@ -302,7 +302,7 @@ def test_migrate_patients_runner_endpoints():
 
 
 def test_rank_meds_endpoint():
-    from meldai.api.res_dtos import RankMoleculesResponse, RankedMoleculeItem
+    from core.dtos.res_dtos import RankMoleculesResponse, RankedMoleculeItem
 
     mock_resp = RankMoleculesResponse(
         type="chiefComplaint",
@@ -325,7 +325,7 @@ def test_rank_meds_endpoint():
         ],
     )
 
-    with patch("meldai.api.router.rank_meds", return_value=mock_resp):
+    with patch("core.router.rank_meds", return_value=mock_resp):
         payload = {
             "type": "chiefComplaint",
             "query": "lack of sleep",
@@ -358,7 +358,7 @@ def test_biolord_embed_endpoint():
     mock_embedder = MagicMock()
     mock_embedder.embed_texts.return_value = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float32)
 
-    with patch("meldai.api.router.get_biolord_embedder", return_value=mock_embedder):
+    with patch("core.router.get_biolord_embedder", return_value=mock_embedder):
         payload = {"texts": ["Etizolam, marketed as ZOLAVIL", "Escitalopram"], "normalize": True}
         resp = client.post("/api/v1/biolord/embed", json=payload)
 
@@ -382,7 +382,7 @@ def test_load_medicine_master_endpoint():
         "duration_seconds": 2.15,
     }
 
-    with patch("meldai.api.router._get_medicine_master_service", return_value=mock_service):
+    with patch("core.router._get_medicine_master_service", return_value=mock_service):
         payload = {"batch_size": 100, "recreate": False}
         resp = client.post("/api/v1/medicines/load-master", json=payload)
 
@@ -406,7 +406,7 @@ def test_search_medicines_endpoint():
         }
     ]
 
-    with patch("meldai.api.router._get_medicine_master_service", return_value=mock_service):
+    with patch("core.router._get_medicine_master_service", return_value=mock_service):
         payload = {"query": "anxiety bridge therapy", "top_k": 5, "min_score": 0.4}
         resp = client.post("/api/v1/medicines/search", json=payload)
 
@@ -432,7 +432,7 @@ def test_generate_medication_search_queries_endpoint():
         ],
     }
 
-    with patch("meldai.api.router.get_gemini_service", return_value=mock_gemini):
+    with patch("core.router.get_gemini_service", return_value=mock_gemini):
         payload = {
             "symptoms": [
                 "Repetitive washing and cleaning",
@@ -454,7 +454,7 @@ def test_generate_medication_search_queries_endpoint():
 
 
 def test_similarity_weights_and_rank_molecules_request_dto():
-    from meldai.api.req_dtos import PatientInfoInput, RankMoleculesRequest, SimilarityWeightsInput
+    from core.dtos.req_dtos import PatientInfoInput, RankMoleculesRequest, SimilarityWeightsInput
 
     # 1. Defaults: w_lca=0.5, w_vector=0.5, min_similarity=0.5
     w = SimilarityWeightsInput()
@@ -499,7 +499,7 @@ def test_similarity_weights_and_rank_molecules_request_dto():
 
 
 def test_patient_info_similarity():
-    from meldai.services.similarity_engine import (
+    from core.services.similarity_engine import (
         gender_similarity,
         normalize_gender,
         patient_info_similarity,
@@ -532,8 +532,8 @@ def test_patient_info_similarity():
 
 
 def test_rank_meds_filtering_and_cumulative_scoring():
-    from meldai.api.req_dtos import RankMoleculesRequest, SimilarityWeightsInput
-    from meldai.services.entity_matrix_service import rank_meds
+    from core.dtos.req_dtos import RankMoleculesRequest, SimilarityWeightsInput
+    from meldai_v2.services.entity_matrix_service import rank_meds
 
     # Candidate 1: Clinical sim 0.8 (match >= 0.5), Age 30 (sim 1.0), Gender Male (sim 1.0)
     # -> Demographic sim = 1.0 -> Case score = 0.5 * 0.8 + 0.5 * 1.0 = 0.9. Meds: Med A, Med B
@@ -578,9 +578,9 @@ def test_rank_meds_filtering_and_cumulative_scoring():
         weights=SimilarityWeightsInput(w_lca=0.5, w_vector=0.5, min_similarity=0.5),
     )
 
-    with patch("meldai.services.entity_matrix_service.get_hpo_service") as mock_hpo_svc, \
-         patch("meldai.services.entity_matrix_service.get_sapbert_embedder") as mock_embedder, \
-         patch("meldai.services.entity_matrix_service.cosine_similarity") as mock_cos:
+    with patch("meldai_v2.services.entity_matrix_service.get_hpo_service") as mock_hpo_svc, \
+         patch("meldai_v2.services.entity_matrix_service.get_sapbert_embedder") as mock_embedder, \
+         patch("meldai_v2.services.entity_matrix_service.cosine_similarity") as mock_cos:
 
         # Setup mock HPO search
         mock_hit = MagicMock()
@@ -601,7 +601,7 @@ def test_rank_meds_filtering_and_cumulative_scoring():
         mock_cos.side_effect = lambda q, e: 0.1
 
         # Patch compute_composite_score for predictable test assertions
-        with patch("meldai.services.entity_matrix_service.compute_composite_score") as mock_comp:
+        with patch("meldai_v2.services.entity_matrix_service.compute_composite_score") as mock_comp:
             def comp_side_effect(scores, weights):
                 if scores["lca"] == 1.0:
                     return 0.7  # clinical match

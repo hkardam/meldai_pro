@@ -19,14 +19,13 @@ logger = logging.getLogger(__name__)
 v1_router = APIRouter(tags=["v1"])
 
 def _dep(name: str, fallback: Any) -> Any:
-    """Dynamically resolve dependency from meldai.api.router or meldai_v1.router (enables mock patching)."""
+    """Dynamically resolve dependency from meldai_v1.router (enables mock patching)."""
     import sys
-    for mod_name in ("meldai.api.router", "meldai_v1.router"):
-        mod = sys.modules.get(mod_name)
-        if mod and hasattr(mod, name):
-            val = getattr(mod, name)
-            if val is not fallback:
-                return val
+    mod = sys.modules.get("meldai_v1.router")
+    if mod and hasattr(mod, name):
+        val = getattr(mod, name)
+        if val is not fallback:
+            return val
     return fallback
 
 

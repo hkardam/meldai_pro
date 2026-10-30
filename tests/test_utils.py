@@ -1,4 +1,4 @@
-from meldai.utils import sanitize, segment
+from core.utils import sanitize, segment
 
 
 def test_sanitize_unicode_and_leading_bullets():
@@ -38,7 +38,7 @@ def test_segment_empty_or_whitespace():
 
 
 def test_clean_diagnosis_term():
-    from meldai.utils import clean_diagnosis_term
+    from core.utils import clean_diagnosis_term
 
     # Target test case requested by user
     assert clean_diagnosis_term("? mdd with anxious distress") == "mdd with anxious distress"

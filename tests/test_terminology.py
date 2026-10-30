@@ -1,9 +1,9 @@
 """Unit tests for offline HPO and MONDO terminology services."""
 
 import pytest
-from meldai.config import get_settings
-from meldai.terminology.hpo import get_hpo_service
-from meldai.terminology.mondo import get_mondo_service
+from core.config import get_settings
+from core.terminology.hpo import get_hpo_service
+from core.terminology.mondo import get_mondo_service
 
 
 @pytest.fixture(scope="module")
@@ -81,7 +81,7 @@ def test_hpo_lack_of_sleep_resolves_to_sleep_disturbance(hpo_service):
 
 def test_to_curie_formatting():
     """Verify canonical CURIE formatting with 7 digits and standard prefixes."""
-    from meldai.utils import to_curie
+    from core.utils import to_curie
 
     assert to_curie("HP", 13600) == "HP:0013600"
     assert to_curie("HP", "HPO:2189") == "HP:0002189"
@@ -95,7 +95,7 @@ def test_to_curie_formatting():
 def test_deficit_symptom_not_negated():
     """Verify that deficit phrases like 'Lack of sleep' are treated as affirmed phenotypes."""
     from unittest.mock import MagicMock
-    from meldai.services.assertion_service import ClinicalAssertionService
+    from core.services.assertion_service import ClinicalAssertionService
 
     mock_nlp = MagicMock()
     mock_doc = MagicMock()

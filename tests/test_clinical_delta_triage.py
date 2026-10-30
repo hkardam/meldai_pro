@@ -1,6 +1,6 @@
 """Unit tests for chief complaint triage, noise filtering, and canonical negation mapping."""
 
-from meldai.services.clinical_delta_service import (
+from meldai_v2.services.clinical_delta_service import (
     ChiefComplaintChangeService,
     ClinicalChangeAssessment,
     TriagedComplaintItem,
@@ -117,7 +117,9 @@ def test_compute_delta_excludes_noise_and_maps_negation():
     assert delta["decreased_symptoms"] == []
     assert delta["maintained_symptoms"] == []
     assert "paranoia" in delta["stop_symptoms"]
-    assert "severe anxiety" in delta["stop_symptoms"]
+    # Severe anxiety was not mentioned in current intake; absence of mention != resolved,
+    # so compute_delta should NOT programmatically auto-classify it as stopped.
+    assert "severe anxiety" not in delta["stop_symptoms"]
     assert "denies paranoia currently" not in delta["stop_symptoms"]
     assert "Informant: patient" not in delta["stop_symptoms"]
     assert "more history to be taken from wife" not in delta["stop_symptoms"]
@@ -168,8 +170,8 @@ def test_generate_clinical_summary_formatting():
 
 
 def test_clinical_date_parsing_and_past_cases_order():
-    from meldai.utils import parse_clinical_date
-    from meldai.services.clinical_delta_service import _format_relative_time
+    from core.utils import parse_clinical_date
+    from meldai_v2.services.clinical_delta_service import _format_relative_time
     from datetime import datetime
 
     # 1. Verify DD/MM/YYYY vs ISO parsing
